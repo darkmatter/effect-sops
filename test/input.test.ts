@@ -37,7 +37,7 @@ describe("resolveSecretStringInput", () => {
     });
 
     const value = await Effect.runPromise(
-      resolveSecretStringInput(Config.string("SOPS_FILE")).pipe(
+      resolveSecretStringInput(Config.String("SOPS_FILE")).pipe(
         Effect.provideService(ConfigProvider.ConfigProvider, provider),
       ),
     );

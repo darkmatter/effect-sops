@@ -67,7 +67,7 @@ export interface SopsConfigOptions {
 /**
  * A `ConfigProvider` backed by a SOPS document.
  *
- * Alchemy resolves provider credentials with `Config.redacted`/`Config.string`,
+ * Alchemy resolves provider credentials with `Config.Redacted`/`Config.String`,
  * which read the ambient `ConfigProvider` rather than `process.env`, so this is
  * enough to authenticate a deploy with no secrets in the environment.
  *

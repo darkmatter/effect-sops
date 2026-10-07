@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Updated the Effect and Alchemy dependencies to their stable-compatible
+  versions. The Config constructors used in examples and tests now use the
+  Effect 4 names (`Config.String`, `Config.Int`, and `Config.Redacted`).
+- Alchemy's Cloudflare adapter is now an optional peer dependency so the
+  application provides one shared adapter instance alongside Alchemy.
+
+
 ## 0.10.0 - 2026-10-06
 
 ### Changed
