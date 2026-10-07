@@ -21,7 +21,7 @@ const source = {
 const resolve = <A>(config: Config.Config<A>, provider: ConfigProvider.ConfigProvider) =>
   Effect.provide(config, ConfigProvider.layer(provider));
 
-const apiToken = Config.nested(Config.string("token"), "api");
+const apiToken = Config.nested(Config.String("token"), "api");
 
 test("resolves a nested path from the decrypted document", async () => {
   const token = await Effect.runPromise(resolve(apiToken, SopsConfig.make(source)));
@@ -31,7 +31,7 @@ test("resolves a nested path from the decrypted document", async () => {
 
 test("resolves a redacted config without revealing it", async () => {
   const token = await Effect.runPromise(
-    resolve(Config.nested(Config.redacted("token"), "api"), SopsConfig.make(source)),
+    resolve(Config.nested(Config.Redacted("token"), "api"), SopsConfig.make(source)),
   );
 
   expect(Redacted.isRedacted(token)).toBe(true);
@@ -41,7 +41,7 @@ test("resolves a redacted config without revealing it", async () => {
 
 test("non-string leaves are readable as their config type", async () => {
   const count = await Effect.runPromise(
-    resolve(Config.nested(Config.int("count"), "nested"), SopsConfig.make(source)),
+    resolve(Config.nested(Config.Int("count"), "nested"), SopsConfig.make(source)),
   );
 
   expect(count).toBe(3);
@@ -50,7 +50,7 @@ test("non-string leaves are readable as their config type", async () => {
 test("selectors flatten a nested document to single-segment lookups", async () => {
   const token = await Effect.runPromise(
     resolve(
-      Config.string("API_TOKEN"),
+      Config.String("API_TOKEN"),
       SopsConfig.make({ ...source, secrets: { API_TOKEN: "api.token" } }),
     ),
   );
@@ -63,7 +63,7 @@ test("a missing path is absent rather than a failure, so fallbacks apply", async
     ConfigProvider.orElse(ConfigProvider.fromUnknown({ ABSENT: "fallback" })),
   );
 
-  const value = await Effect.runPromise(resolve(Config.string("ABSENT"), provider));
+  const value = await Effect.runPromise(resolve(Config.String("ABSENT"), provider));
 
   expect(value).toBe("fallback");
 });
@@ -95,7 +95,7 @@ test("never decrypts when an earlier provider supplies the value", async () => {
     ConfigProvider.orElse(SopsConfig.make({ ...source, decrypt: failing })),
   );
 
-  const value = await Effect.runPromise(resolve(Config.string("TOKEN"), provider));
+  const value = await Effect.runPromise(resolve(Config.String("TOKEN"), provider));
 
   expect(value).toBe("from-env");
   expect(decryptions).toBe(0);

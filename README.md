@@ -97,7 +97,7 @@ export default Alchemy.Stack(
     const secrets = yield* SopsFile("Secrets", {
       path: "./secrets.enc.yaml",
       format: "yaml",
-      ageKey: Config.redacted("SOPS_AGE_KEY"),
+      ageKey: Config.Redacted("SOPS_AGE_KEY"),
       schema: AppSecrets,
     });
 
@@ -159,7 +159,7 @@ export default Alchemy.Stack(
   Effect.gen(function* () {
     const secrets = yield* SopsFile("Secrets", {
       json: encrypted,
-      ageKey: Config.redacted("SOPS_AGE_KEY"),
+      ageKey: Config.Redacted("SOPS_AGE_KEY"),
     });
 
     // secrets.data is fully typed from the import: scalar leaves are
@@ -318,8 +318,8 @@ must be passed as `content`.
 `SopsFile` decrypts secrets _inside_ a stack, which is too late for the
 credentials the stack itself needs to authenticate. `effect-sops/Config` covers
 that earlier moment: it turns a SOPS document into an Effect `ConfigProvider`,
-and because Alchemy resolves provider credentials through `Config.redacted` /
-`Config.string` rather than reading `process.env` directly, a deploy can
+and because Alchemy resolves provider credentials through `Config.Redacted` /
+`Config.String` rather than reading `process.env` directly, a deploy can
 authenticate with nothing in the environment — no `sops exec-env` wrapper and no
 exported variables.
 

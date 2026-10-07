@@ -10,5 +10,5 @@ export default Alchemy.Stack(
     providers: SopsFileProvider({ memoize: true }),
     state: Alchemy.localState(),
   },
-  program(Config.redacted("SOPS_AGE_KEY")),
+  program(Config.Redacted("SOPS_AGE_KEY")),
 );

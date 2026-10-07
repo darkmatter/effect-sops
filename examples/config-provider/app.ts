@@ -9,8 +9,8 @@ const secretsPath = new URL("../_shared/secrets.sops.json", import.meta.url)
 
 export const readAppConfig = (ageKey: string | Redacted.Redacted<string>) =>
   Effect.all({
-    apiToken: Config.nested(Config.redacted("token"), "api"),
-    retryCount: Config.nested(Config.int("count"), "nested"),
+    apiToken: Config.nested(Config.Redacted("token"), "api"),
+    retryCount: Config.nested(Config.Int("count"), "nested"),
   }).pipe(
     Effect.provide(
       ConfigProvider.layer(
