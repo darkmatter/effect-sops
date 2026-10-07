@@ -4,7 +4,7 @@ import { Retry } from "@distilled.cloud/cloudflare";
 import * as GitHub from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
 import * as Test from "alchemy/Test/Bun";
-import { SopsFileProvider } from "alchemy-sops";
+import { SopsFileProvider } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";

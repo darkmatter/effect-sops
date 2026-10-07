@@ -1,7 +1,7 @@
 import {
   GitHubSopsSecrets,
   type SecretStringInput,
-} from "alchemy-sops";
+} from "effect-sops";
 
 const secretsPath = new URL("../_shared/secrets.sops.json", import.meta.url)
   .pathname;

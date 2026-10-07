@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "alchemy-sops",
+      "name": "effect-sops",
       "dependencies": {
         "@distilled.cloud/cloudflare": "^0.30.0",
         "@drkmttr/sops-age": "^4.1.0",

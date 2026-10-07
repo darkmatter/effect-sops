@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 - 2026-10-06
+
+### Changed
+
+- Renamed the package from `alchemy-sops` to `effect-sops`, and the repository
+  to `darkmatter/effect-sops`. Replace `alchemy-sops` with `effect-sops` in
+  dependencies and import paths (`effect-sops/Config`, `effect-sops/edge`,
+  and so on); the API is unchanged.
+
 ## 0.9.0 - 2026-09-22
 
 ### Added

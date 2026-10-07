@@ -1,9 +1,9 @@
-# alchemy-sops
+# effect-sops
 
 Effect-native SOPS decoding and optional Alchemy resources with redacted
 secret outputs.
 
-`alchemy-sops` decrypts SOPS files with a native `sops-age` backend (via `@drkmttr/sops-age`, our fork with KMS data-key support). It keeps
+`effect-sops` decrypts SOPS files with a native `sops-age` backend (via `@drkmttr/sops-age`, our fork with KMS data-key support). It keeps
 decrypted scalar values redacted while they move through Effect and Alchemy.
 The `sops` CLI backend remains available for binary files, custom SOPS flags,
 and non-age backends.
@@ -32,7 +32,7 @@ and non-age backends.
 ## Install
 
 ```sh
-bun add alchemy-sops effect
+bun add effect-sops effect
 ```
 
 `effect` is a required peer. `alchemy` is optional and is only needed when you
@@ -55,7 +55,7 @@ format or TypeScript typing technique:
 | When the value is needed | Start with | What varies within this route |
 | --- | --- | --- |
 | Inside an Alchemy stack | [`SopsFile`](#read-a-sops-document) | `path`, `content`, `url`, or JSON import; schema or inferred typing |
-| Before the stack initializes | [`alchemy-sops/Config`](#before-an-alchemy-stack) | Config lookup shape and credential mapping |
+| Before the stack initializes | [`effect-sops/Config`](#before-an-alchemy-stack) | Config lookup shape and credential mapping |
 | At a deployment target | [Cloudflare](#cloudflare-secrets-store) or [GitHub](#github-actions-secrets) import | Target provider and target-secret names |
 
 If you are not using Alchemy at all, use the focused
@@ -73,7 +73,7 @@ lifecycle model.
 ```ts
 import * as Alchemy from "alchemy";
 import * as Output from "alchemy/Output";
-import { SopsFile, SopsFileProvider } from "alchemy-sops";
+import { SopsFile, SopsFileProvider } from "effect-sops";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -145,7 +145,7 @@ with no `schema` and no `secrets` keys to declare:
 ```ts
 import * as Alchemy from "alchemy";
 import * as Output from "alchemy/Output";
-import { SopsFile, SopsFileProvider } from "alchemy-sops";
+import { SopsFile, SopsFileProvider } from "effect-sops";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import encrypted from "./secrets.enc.json" with { type: "json" };
@@ -183,13 +183,13 @@ runtime validation or non-redacted leaf types.
 
 ### Decode an imported JSON document
 
-Use `alchemy-sops/Schema` to decrypt an imported SOPS JSON document and decode
+Use `effect-sops/Schema` to decrypt an imported SOPS JSON document and decode
 it with an Effect 4 `Schema.Struct` without configuring an Alchemy Stack. The
 curried API defines the schema once, then decodes each encrypted import with
 `Schema.decodeEffect(AppSecrets)(encrypted)`:
 
 ```ts
-import * as Schema from "alchemy-sops/Schema";
+import * as Schema from "effect-sops/Schema";
 import * as Effect from "effect/Effect";
 import * as EffectSchema from "effect/Schema";
 import encrypted from "./secrets.enc.json" with { type: "json" };
@@ -208,7 +208,7 @@ const loadSecrets = Effect.gen(function* () {
 });
 ```
 
-This subpath and `alchemy-sops/edge` are Alchemy-free. The package root remains
+This subpath and `effect-sops/edge` are Alchemy-free. The package root remains
 the Alchemy resource API and therefore requires the optional `alchemy` peer at
 runtime.
 
@@ -265,7 +265,7 @@ Alchemy programs can avoid local filesystem and process APIs by using inline
 encrypted content or a URL source with the native backend:
 
 ```ts
-import { SopsFile } from "alchemy-sops";
+import { SopsFile } from "effect-sops";
 
 const secrets =
   yield *
@@ -278,10 +278,10 @@ const secrets =
 ```
 
 The Alchemy resource entrypoint still imports Alchemy. For code that is bundled
-directly into an edge runtime, use the low-level `alchemy-sops/edge` subpath:
+directly into an edge runtime, use the low-level `effect-sops/edge` subpath:
 
 ```ts
-import { runSopsAge } from "alchemy-sops/edge";
+import { runSopsAge } from "effect-sops/edge";
 ```
 
 ### KMS-encrypted documents (no age key, no `sops` binary)
@@ -293,7 +293,7 @@ needs: unwrap a `sops.kms[]` entry with `kms:Decrypt`.
 
 ```ts
 import * as Effect from "effect/Effect";
-import { runSopsKms } from "alchemy-sops/edge";
+import { runSopsKms } from "effect-sops/edge";
 
 const decrypt = runSopsKms({
   // entry = { arn, enc, ... } from the document's sops.kms[] list.
@@ -305,10 +305,8 @@ const decrypt = runSopsKms({
 const json = yield* decrypt({ content: encryptedJson, binary: "sops", inputType: "json", outputType: "json" });
 ```
 
-`@darkmatter/sdk/aws` ships `sopsDataKeyUnwrapper(credentials)` as a ready-made
-`unwrapDataKey` on top of its `WorkloadIdentity` credentials. The result plugs
-into anything that accepts `decrypt`, so `SopsFile` and `alchemy-sops/Config`
-work unchanged with a KMS-only document.
+The `decrypt` from `runSopsKms` plugs into anything that accepts `decrypt`, so `SopsFile` and
+`effect-sops/Config` work unchanged with a KMS-only document.
 
 Leaf decryption is `sops-age`'s own (its `dataKey` option), so the two native
 backends share one implementation; like the `sops-age` backend, the
@@ -318,7 +316,7 @@ must be passed as `content`.
 ## Before an Alchemy stack
 
 `SopsFile` decrypts secrets _inside_ a stack, which is too late for the
-credentials the stack itself needs to authenticate. `alchemy-sops/Config` covers
+credentials the stack itself needs to authenticate. `effect-sops/Config` covers
 that earlier moment: it turns a SOPS document into an Effect `ConfigProvider`,
 and because Alchemy resolves provider credentials through `Config.redacted` /
 `Config.string` rather than reading `process.env` directly, a deploy can
@@ -326,7 +324,7 @@ authenticate with nothing in the environment — no `sops exec-env` wrapper and 
 exported variables.
 
 ```ts
-import * as SopsConfig from "alchemy-sops/Config";
+import * as SopsConfig from "effect-sops/Config";
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 
@@ -362,7 +360,7 @@ _behind_ the environment, so an ambient `CLOUDFLARE_API_TOKEN=… bun run deploy
 still wins and the document is never decrypted on that path:
 
 ```ts
-import * as SopsConfig from "alchemy-sops/Config";
+import * as SopsConfig from "effect-sops/Config";
 
 const credentials = SopsConfig.layerAdd({ path: "secrets.sops.json" });
 // or SopsConfig.layerAdd({ ... }, { asPrimary: true }) to consult SOPS first,
@@ -407,7 +405,7 @@ A stack using the Action needs:
 ```ts
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-import { CloudflareSopsSecrets, cloudflareSopsWorkerBindings } from "alchemy-sops";
+import { CloudflareSopsSecrets, cloudflareSopsWorkerBindings } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
@@ -427,7 +425,7 @@ export default Alchemy.Stack(
       store,
       ageKey: Redacted.make(process.env.SOPS_AGE_KEY!),
       scopes: ["workers"],
-      comment: "imported by alchemy-sops",
+      comment: "imported by effect-sops",
       secrets: {
         API_TOKEN: "api.token",
         DATABASE_URL: "database.url",
@@ -483,7 +481,7 @@ Most stacks should call `CloudflareSopsSecrets`. Use
 already available and you want to pass the Action input yourself:
 
 ```ts
-import { CloudflareSopsSecretsAction } from "alchemy-sops";
+import { CloudflareSopsSecretsAction } from "effect-sops";
 import * as Redacted from "effect/Redacted";
 
 const imported =
@@ -518,7 +516,7 @@ repositories or `public_repo` for public repositories.
 ```ts
 import * as Alchemy from "alchemy";
 import * as GitHub from "alchemy/GitHub";
-import { GitHubSopsSecrets, SopsFileProvider } from "alchemy-sops";
+import { GitHubSopsSecrets, SopsFileProvider } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -642,7 +640,7 @@ trust for decrypted secrets.
 
 ### `TypeError: undefined is not an object (evaluating 'impl.base.get')` when providing a ConfigProvider
 
-**Symptom:** A stack using `alchemy-sops/Config` dies immediately with a
+**Symptom:** A stack using `effect-sops/Config` dies immediately with a
 `TypeError` inside `effect/Context.js` at `lookup`, with no mention of SOPS or
 configuration. Stack frames reference two different `effect` paths, for example
 `effect@4.0.0-beta.102` and `effect@4.0.0-beta.105`.
@@ -655,7 +653,7 @@ a different `effect` than the app.
 
 **Fix:** Align `effect` to a single version across the workspace and reinstall.
 For Bun, `ls node_modules/.bun | grep '^effect@'` should show one version for
-application code. `effect` is a peer dependency of `alchemy-sops` for exactly
+application code. `effect` is a peer dependency of `effect-sops` for exactly
 this reason — let the app own the version rather than nesting a second copy.
 
 If a shared package must expose credentials, have it return plain data and let
@@ -669,7 +667,7 @@ assignable to the `Output<…>` expected by `alchemy/Output` helpers (for exampl
 `node_modules/alchemy` versions and incompatible `bind(...)` return types
 (`RuntimeContext` vs `ExecutionContext`).
 
-**Cause:** Two copies of `alchemy` are installed. `alchemy-sops` decrypts via one
+**Cause:** Two copies of `alchemy` are installed. `effect-sops` decrypts via one
 instance (for example the version pulled in as its dependency), while your stack
 imports `alchemy`, `alchemy/Cloudflare`, and `alchemy/Output` from another.
 `Output` is not portable across versions — even patch differences in the Effect
@@ -684,7 +682,7 @@ runtime context break assignability.
    package manager’s equivalent) and confirm only one `alchemy` appears under
    `node_modules` (for Bun: `ls node_modules/.bun | grep '^alchemy@'` should
    show a single version for app code).
-3. **Prefer `alchemy` as a peer, not a nested dependency.** `alchemy-sops` lists
+3. **Prefer `alchemy` as a peer, not a nested dependency.** `effect-sops` lists
    `alchemy` as a `peerDependency` with a semver range so your project’s
    `alchemy` is the one both the stack and `SopsFile` use. Avoid relying on a
    nested copy bundled inside another package.

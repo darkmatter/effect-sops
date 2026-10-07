@@ -2,7 +2,7 @@ import * as Output from "alchemy/Output";
 import {
   SopsFile,
   type SecretStringInput,
-} from "alchemy-sops";
+} from "effect-sops";
 import * as Effect from "effect/Effect";
 import encrypted from "../_shared/secrets.sops.json" with { type: "json" };
 

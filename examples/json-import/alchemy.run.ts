@@ -1,5 +1,5 @@
 import * as Alchemy from "alchemy";
-import { SopsFileProvider } from "alchemy-sops";
+import { SopsFileProvider } from "effect-sops";
 import * as Config from "effect/Config";
 
 import { program } from "./app.ts";

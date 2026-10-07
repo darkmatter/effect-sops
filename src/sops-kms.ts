@@ -86,7 +86,7 @@ const kmsEntries = (
 
 /**
  * A `SopsDecrypt` whose master key is AWS KMS. Plug it in wherever a
- * `decrypt` is accepted (`SopsFile`, `alchemy-sops/Config`) or call it
+ * `decrypt` is accepted (`SopsFile`, `effect-sops/Config`) or call it
  * directly at the edge.
  */
 export const runSopsKms =

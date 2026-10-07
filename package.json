@@ -1,15 +1,15 @@
 {
-  "name": "alchemy-sops",
-  "version": "0.9.0",
+  "name": "effect-sops",
+  "version": "0.10.0",
   "description": "Effect-native SOPS Schema decoding and optional Alchemy resources with redacted secret outputs.",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/darkmatter/alchemy-sops.git"
+    "url": "https://github.com/darkmatter/effect-sops.git"
   },
-  "homepage": "https://github.com/darkmatter/alchemy-sops#readme",
+  "homepage": "https://github.com/darkmatter/effect-sops#readme",
   "bugs": {
-    "url": "https://github.com/darkmatter/alchemy-sops/issues"
+    "url": "https://github.com/darkmatter/effect-sops/issues"
   },
   "publishConfig": {
     "access": "public",

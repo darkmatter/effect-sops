@@ -48,7 +48,7 @@ export interface DecryptOptions {
  *
  * @example
  * ```ts
- * import * as Schema from "alchemy-sops/Schema";
+ * import * as Schema from "effect-sops/Schema";
  * import * as EffectSchema from "effect/Schema";
  * import encrypted from "./secrets.enc.json" with { type: "json" };
  *

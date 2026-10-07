@@ -11,7 +11,7 @@ import { runSopsAge, runSopsCli, type SopsBackend, type SopsDecrypt } from "./so
  * except for formats the native backend cannot represent.
  *
  * This lives outside `resource.ts` so entry points that must not depend on
- * Alchemy — such as `alchemy-sops/Config` — can share the same selection.
+ * Alchemy — such as `effect-sops/Config` — can share the same selection.
  */
 export const defaultDecrypt = (backend: SopsBackend, format: SopsDocumentFormat): SopsDecrypt => {
   switch (backend) {

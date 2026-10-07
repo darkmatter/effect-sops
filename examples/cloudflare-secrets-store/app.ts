@@ -1,7 +1,7 @@
 import {
   CloudflareSopsSecrets,
   type MaybeRedactedString,
-} from "alchemy-sops";
+} from "effect-sops";
 
 const secretsPath = new URL("../_shared/secrets.sops.json", import.meta.url)
   .pathname;
@@ -21,6 +21,6 @@ export const program = (options: CloudflareSecretsDemoOptions) =>
       accountId: options.accountId,
       storeId: options.storeId,
     },
-    comment: "managed by the alchemy-sops example",
+    comment: "managed by the effect-sops example",
     secrets: { API_TOKEN: "api.token" },
   });

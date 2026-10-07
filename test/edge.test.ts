@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("edge entrypoint bundles without the CLI process backend", async () => {
-  const outdir = await mkdtemp(join(tmpdir(), "alchemy-sops-edge-"));
+  const outdir = await mkdtemp(join(tmpdir(), "effect-sops-edge-"));
 
   try {
     const result = await Bun.build({

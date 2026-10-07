@@ -129,7 +129,7 @@ test.provider(
           secrets: {
             API_TOKEN: "api.token",
           },
-          comment: "imported by alchemy-sops",
+          comment: "imported by effect-sops",
         });
 
         return {
@@ -217,7 +217,7 @@ test.provider(
             secrets: {
               API_TOKEN: "api.token",
             },
-            comment: "imported by alchemy-sops",
+            comment: "imported by effect-sops",
           });
         }),
       );
@@ -249,7 +249,7 @@ devTest.provider(
             secrets: {
               API_TOKEN: "api.token",
             },
-            comment: "imported by alchemy-sops",
+            comment: "imported by effect-sops",
           });
         }),
       );

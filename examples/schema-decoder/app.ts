@@ -1,4 +1,4 @@
-import * as SopsSchema from "alchemy-sops/Schema";
+import * as SopsSchema from "effect-sops/Schema";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import encrypted from "../_shared/secrets.sops.json" with { type: "json" };

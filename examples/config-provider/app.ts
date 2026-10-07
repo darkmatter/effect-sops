@@ -1,4 +1,4 @@
-import * as SopsConfig from "alchemy-sops/Config";
+import * as SopsConfig from "effect-sops/Config";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";

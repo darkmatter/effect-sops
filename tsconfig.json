@@ -8,8 +8,8 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "paths": {
-      "alchemy-sops": ["./src/index.ts"],
-      "alchemy-sops/*": ["./src/*.ts"]
+      "effect-sops": ["./src/index.ts"],
+      "effect-sops/*": ["./src/*.ts"]
     },
     "resolveJsonModule": true,
     "skipLibCheck": true,

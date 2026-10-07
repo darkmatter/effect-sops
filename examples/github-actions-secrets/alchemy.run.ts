@@ -3,7 +3,7 @@ import * as GitHub from "alchemy/GitHub";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
-import { SopsFileProvider } from "alchemy-sops";
+import { SopsFileProvider } from "effect-sops";
 import { requiredEnvironment } from "../_shared/env.ts";
 import { program } from "./app.ts";
 
