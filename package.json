@@ -52,8 +52,25 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "prepack": "bun run build",
+    "release": "release-it",
     "smoke:examples": "bun test examples/smoke.test.ts",
     "test": "cd test && bun test"
+  },
+  "release-it": {
+    "$schema": "https://unpkg.com/release-it@21.1.1/schema/release-it.json",
+    "git": {
+      "commitMessage": "chore: release v${version}",
+      "requireBranch": "main",
+      "tag": false
+    },
+    "github": {
+      "autoGenerate": true,
+      "release": true
+    },
+    "npm": {
+      "allowSameVersion": true,
+      "publish": false
+    }
   },
   "dependencies": {
     "@drkmttr/sops-age": "^4.1.0",
@@ -66,6 +83,7 @@
     "alchemy": "2.0.0-beta.81",
     "effect": "4.0.1",
     "expect-type": "1.4.0",
+    "release-it": "21.1.1",
     "typescript": "^7.0.0"
   },
   "peerDependencies": {
