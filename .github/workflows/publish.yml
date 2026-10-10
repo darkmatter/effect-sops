@@ -1,29 +1,113 @@
 name: Publish to npm
 
+# Push a vX.Y.Z tag at the current main to release. The release job bumps
+# package.json to the tag's version with release-it, commits that bump to
+# main, and creates the GitHub Release; the publish job then publishes the
+# bumped main to npm. Both jobs live in this file because npm trusted
+# publishing authorizes the workflow file that starts the run (publish.yml).
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Existing release tag to (re)publish, for example v0.11.0."
+        required: true
+        type: string
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish
   cancel-in-progress: false
 
 jobs:
+  release:
+    name: Bump version and create GitHub Release
+    if: github.repository == 'darkmatter/effect-sops' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Derive version from tag
+        id: release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" == "$GITHUB_REF_NAME" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like vX.Y.Z, optionally with a prerelease/build suffix." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Ensure tag was cut from current main
+        shell: bash
+        run: |
+          tag_sha="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          main_sha="$(git rev-parse HEAD)"
+          if [[ "$tag_sha" != "$main_sha" ]]; then
+            echo "Tag $GITHUB_REF_NAME must point at current main before release-it adds the version bump commit." >&2
+            echo "tag=$tag_sha main=$main_sha" >&2
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run check
+
+      - name: Test package
+        run: bun run test
+
+      - name: Bump version and create GitHub Release
+        run: bun run release -- --ci "${{ steps.release.outputs.version }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   publish:
     name: Publish package
-    if: github.repository == 'darkmatter/effect-sops'
+    needs: release
+    # Runs after a successful release job, or alone for a manual republish.
+    if: >-
+      always() && github.repository == 'darkmatter/effect-sops' &&
+      (needs.release.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.release.result == 'skipped'))
     runs-on: ubuntu-latest
     environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
 
     steps:
-      - name: Checkout
+      # main, not the tag: the tag is the commit before release-it's bump.
+      - name: Checkout main
         uses: actions/checkout@v7
+        with:
+          ref: main
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -34,6 +118,18 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
+
+      - name: Verify release tag matches package version
+        id: package
+        run: |
+          version="${TAG_NAME#v}"
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$version" != "$package_version" ]; then
+            echo "::error::Release tag $TAG_NAME does not match package.json version $package_version."
+            exit 1
+          fi
+          echo "spec=$package_name@$package_version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -50,29 +146,17 @@ jobs:
       - name: Smoke test examples
         run: bun run smoke:examples
 
-      - name: Read package metadata
-        id: package
-        run: >-
-          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT, "spec=" + pkg.name + "@" + pkg.version + "\n");'
-
-      - name: Check npm publication
-        id: npm
+      - name: Publish
         env:
           PACKAGE_SPEC: ${{ steps.package.outputs.spec }}
         run: |
+          # A rerun after a successful publish skips the version already on npm.
           if npm view "$PACKAGE_SPEC" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$PACKAGE_SPEC is already published."
           else
-            echo "published=false" >> "$GITHUB_OUTPUT"
+            npm publish --provenance
           fi
 
-      - name: Publish
-        if: steps.npm.outputs.published != 'true'
-        run: npm publish --provenance
-
-      # A freshly published version can take a moment to become readable, so a
-      # single `npm view` here fails the job after a successful publish and
-      # skips the release below.
       - name: Verify npm publication
         env:
           PACKAGE_SPEC: ${{ steps.package.outputs.spec }}
@@ -88,20 +172,3 @@ jobs:
           done
           echo "::error::$PACKAGE_SPEC never became readable on the registry"
           exit 1
-
-      - name: Create GitHub Release
-        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists"
-          else
-            gh release create "$RELEASE_TAG" \
-              --repo "$GH_REPO" \
-              --verify-tag \
-              --title "$RELEASE_TAG" \
-              --generate-notes
-          fi
