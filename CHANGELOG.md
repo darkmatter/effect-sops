@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node
+- Document MAC verification on the keyservice path, bounded RPC deadlines,
+- Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node and Bun, using the existing @drkmttr/sops-age data-key API. Schema, Config, resources, and Actions support SOPS_KEYSERVICE, SOPS_ENABLE_LOCAL_KEYSERVICE, and explicit per-call options
+- Document MAC verification on the keyservice path, bounded RPC deadlines, interruption cleanup, and endpoint-aware decryption cache keys. Configured keyservices never fall back to invoking the SOPS CLI
 ## 0.11.0 - 2026-10-08
 
 ### Changed

@@ -1,3 +1,5 @@
+import { defaultDecrypt } from "./backend.js";
+import type { SopsKeyServiceOptions } from "./keyservice-options.js";
 import * as secretsStore from "@distilled.cloud/cloudflare/secrets-store";
 import { Action, Stage } from "alchemy";
 import type * as Output from "alchemy/Output";
@@ -19,9 +21,6 @@ import { buildSopsCommandRequest } from "./source.js";
 import {
   type SopsBackend,
   type SopsCliFormat,
-  type SopsDecrypt,
-  runSopsAge,
-  runSopsCli,
 } from "./sops.js";
 
 const CLOUDFLARE_SECRETS_STORE_PAGE_SIZE = 100;
@@ -36,7 +35,7 @@ export interface CloudflareSecretsStoreInput {
   readonly storeId: string | Output.Output<string, any>;
 }
 
-export interface CloudflareSopsSecretsOptions {
+export interface CloudflareSopsSecretsOptions extends SopsKeyServiceOptions {
   /** Local SOPS file read at plan time. Ciphertext is stored in Action state. */
   readonly path: string | readonly string[];
   /** Optional working directory for relative paths and CLI execution. */
@@ -513,36 +512,6 @@ const isReadonlyStringArray = (value: unknown): value is readonly string[] =>
 const resolveFallbackFormat = (
   format: SopsDocumentFormat,
 ): ResolvedSopsDocumentFormat => (format === "auto" ? "json" : format);
-
-const defaultDecrypt = (
-  backend: SopsBackend,
-  format: SopsDocumentFormat,
-): SopsDecrypt => {
-  switch (backend) {
-    case "cli":
-      return runSopsCli;
-    case "sops-age":
-      return runSopsAge;
-    case "auto":
-      return format === "binary" || format === "text"
-        ? runSopsCli
-        : (request) =>
-            runSopsAge(request).pipe(
-              Effect.catchIf(
-                () => true,
-                (nativeError) =>
-                  request.path
-                    ? runSopsCli(request).pipe(
-                        Effect.catchIf(
-                          () => true,
-                          () => Effect.fail(nativeError),
-                        ),
-                      )
-                    : Effect.fail(nativeError),
-              ),
-            );
-  }
-};
 
 const formatTopLevelKeys = (keys: readonly string[]): string =>
   keys.length === 0 ? "(none)" : keys.join(", ");

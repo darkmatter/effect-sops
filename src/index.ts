@@ -74,3 +74,5 @@ export {
   resolveSecretStringInput,
 } from "./input.js";
 export * from "./errors.js";
+
+export type { SopsKeyServiceOptions } from "./keyservice-options.js";

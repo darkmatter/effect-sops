@@ -2,12 +2,14 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 
+import { keyServiceSettings, type SopsKeyServiceOptions } from "./keyservice-options.js";
+
 import { SopsDecryptError } from "./errors.js";
 
 export type SopsCliFormat = "json" | "yaml" | "dotenv" | "binary";
 export type SopsBackend = "auto" | "cli" | "sops-age";
 
-export interface SopsCommandRequest {
+export interface SopsCommandRequest extends SopsKeyServiceOptions {
   readonly path?: string;
   readonly content?: string | Redacted.Redacted<string>;
   readonly url?: string | Redacted.Redacted<string>;
@@ -74,6 +76,7 @@ export const defaultSopsDecryptMemoizeKey = (
     extract: request.extract,
     args: request.args,
     envKeys: Object.keys(request.env ?? {}).sort(),
+    keyService: keyServiceSettings(request),
     timeoutMs: request.timeoutMs,
   });
 
@@ -89,6 +92,10 @@ export const buildSopsArgs = (request: SopsCommandRequest): string[] => {
   }
   if (request.extract) {
     args.push("--extract", request.extract);
+  }
+  for (const uri of request.keyServices ?? []) args.push("--keyservice", uri);
+  if (request.enableLocalKeyService !== undefined) {
+    args.push(`--enable-local-keyservice=${request.enableLocalKeyService}`);
   }
   args.push(...(request.args ?? []));
   args.push(path);

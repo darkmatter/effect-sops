@@ -18,6 +18,7 @@ and non-age backends.
   - [Type a JSON import](#type-a-json-import)
 - [Without an Alchemy stack](#without-an-alchemy-stack)
   - [Decode an imported JSON document](#decode-an-imported-json-document)
+  - [Native SOPS keyservices](#native-sops-keyservices)
   - [Edge usage](#edge-usage)
 - [Before an Alchemy stack](#before-an-alchemy-stack)
 - [At a deployment target](#at-a-deployment-target)
@@ -259,6 +260,49 @@ shape remains available to TypeScript. Use `SopsFile` or the low-level edge APIs
 for path, URL, extract, and ordered merge workflows; those sources cannot carry
 a static JSON import shape.
 
+### Native SOPS keyservices
+
+In Node and Bun, age-encrypted documents can use a SOPS keyservice directly
+from TypeScript. The client does not need a `sops` binary or a local private key:
+
+```sh
+export SOPS_KEYSERVICE=unix:///run/sops/keyservice.sock
+export SOPS_ENABLE_LOCAL_KEYSERVICE=false
+```
+
+Existing `Schema.decodeEffect(...)`, `SopsConfig.make(...)`, and `SopsFile(...)`
+calls discover these variables. You can also configure them per call:
+
+```ts
+const secrets = yield* Schema.decodeEffect(AppSecrets)(encrypted, {
+  keyServices: ["unix:///run/sops/keyservice.sock"],
+  enableLocalKeyService: false,
+  timeoutMs: 5_000,
+});
+```
+
+`keyServices` and `enableLocalKeyService` also work on Config, resource, and
+Cloudflare Action options. Explicit options override `env` entries, which
+override process environment variables. An explicit `keyServices: []` clears
+inherited endpoints. `SOPS_KEYSERVICE` accepts comma-separated endpoints;
+`keyServices` is an ordered array of `unix:///absolute/path` or `tcp://host:port`
+URIs. Local age identities are tried first unless local recovery is disabled.
+Remote services are tried in order until one unwraps the data key.
+
+This path uses `@drkmttr/sops-age`'s `dataKey` option for leaf decryption and
+verifies the document MAC before returning any plaintext, including with
+`extract`. It supports age recipients in JSON, YAML, and dotenv documents,
+from imported JSON, inline content, files, or URLs. Key groups/Shamir shares,
+other recipient types, and comment-based encryption rules are not supported.
+The default timeout is 30 seconds; interruptions cancel active RPCs and close
+connections. When keyservices are configured, `auto` uses this native path and
+returns its errors without falling back to the CLI.
+
+The Unix/TCP gRPC transport is available in the Node/Bun entry points. The
+`effect-sops/edge` entry point stays free of that transport and reports an error
+if keyservices are requested. SOPS's keyservice protocol uses unauthenticated,
+unencrypted gRPC; remote endpoints should use an existing secure tunnel.
+
 ### Edge usage
 
 Alchemy programs can avoid local filesystem and process APIs by using inline
@@ -309,8 +353,8 @@ The `decrypt` from `runSopsKms` plugs into anything that accepts `decrypt`, so `
 `effect-sops/Config` work unchanged with a KMS-only document.
 
 Leaf decryption is `sops-age`'s own (its `dataKey` option), so the two native
-backends share one implementation; like the `sops-age` backend, the
-document-level `sops.mac` is not verified. JSON and YAML only; the document
+backends share one implementation; the KMS adapter and age decryption without keyservice configuration do not verify
+the document-level `sops.mac`. The native keyservice path does verify it. JSON and YAML only; the document
 must be passed as `content`.
 
 ## Before an Alchemy stack
@@ -572,6 +616,7 @@ Supported options:
 - `inputType`, `outputType`: input/output format hints
 - `extract`: passed to `sops --extract` for CLI and as a key path for `sops-age`
 - `sopsArgs`: extra CLI args; requires `backend: "cli"` or CLI fallback
+- `keyServices`, `enableLocalKeyService`: native keyservice endpoints and local age recovery policy
 - `env`, `ageKey`, `ageKeyFile`: SOPS environment inputs; `sops-age` uses
   direct `ageKey` / `SOPS_AGE_KEY`
 - `schema`: service-free `Schema.Struct` from `effect/Schema`; validates the

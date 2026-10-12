@@ -25,7 +25,7 @@ import {
   type SopsDecrypt,
 } from "./decrypt.js";
 import { SopsDecryptError } from "./errors.js";
-import { encodeDecryptedValue, normalizeSopsExtract } from "./sops-age.js";
+import { encodeDecryptedValue, normalizeSopsExtract } from "./sops-age-core.js";
 
 /** One `sops.kms[]` entry: the data key wrapped by one KMS key. */
 export interface SopsKmsEntry {

@@ -22,6 +22,9 @@ test("edge entrypoint bundles without the CLI process backend", async () => {
     const bundled = await readFile(join(outdir, "edge.js"), "utf8");
     expect(bundled).not.toContain("node:child_process");
     expect(bundled).not.toContain("child_process");
+    expect(bundled).not.toContain("@grpc/grpc-js");
+    expect(bundled).not.toContain("node:http2");
+    expect(bundled).not.toContain("/KeyService/Decrypt");
   } finally {
     await rm(outdir, { recursive: true, force: true });
   }

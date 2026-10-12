@@ -29,6 +29,8 @@ const runSopsCliPromise = (request: SopsCommandRequest): Promise<string> =>
     const env = {
       ...process.env,
       ...revealEnv(request.env),
+      // Explicit endpoint lists override inherited services, including [].
+      ...(request.keyServices !== undefined ? { SOPS_KEYSERVICE: "" } : {}),
     };
 
     const child = spawn(request.binary, args, {

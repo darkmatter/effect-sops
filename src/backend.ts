@@ -1,3 +1,4 @@
+import { usesKeyServices } from "./keyservice-options.js";
 import * as Effect from "effect/Effect";
 
 import type { SopsDocumentFormat } from "./document.js";
@@ -20,7 +21,9 @@ export const defaultDecrypt = (backend: SopsBackend, format: SopsDocumentFormat)
     case "sops-age":
       return runSopsAge;
     case "auto":
-      return format === "binary" || format === "text" ? runSopsCli : runSopsAgeWithCliFallback;
+      return (request) => usesKeyServices(request)
+        ? runSopsAge(request)
+        : format === "binary" || format === "text" ? runSopsCli(request) : runSopsAgeWithCliFallback(request);
   }
 };
 
@@ -29,7 +32,7 @@ export const runSopsAgeWithCliFallback: SopsDecrypt = (request) =>
     Effect.catchIf(
       () => true,
       (nativeError) => {
-        if (!request.path) return Effect.fail(nativeError);
+        if (!request.path || usesKeyServices(request)) return Effect.fail(nativeError);
 
         return runSopsCli(request).pipe(
           Effect.catchIf(

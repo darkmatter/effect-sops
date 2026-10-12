@@ -4,10 +4,10 @@ export {
   type EncryptedFor,
   type EncryptedScalar,
   type SopsMetadata,
-} from "./Schema.js";
+} from "./schema-edge.js";
 export {
   runSopsAge,
-} from "./sops-age.js";
+} from "./sops-age-edge.js";
 export {
   runSopsKms,
   type SopsKmsEntry,
@@ -41,3 +41,5 @@ export {
   resolveSecretStringInput,
 } from "./input.js";
 export * from "./errors.js";
+
+export type { SopsKeyServiceOptions } from "./keyservice-options.js";

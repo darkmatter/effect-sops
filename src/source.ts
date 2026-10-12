@@ -1,3 +1,4 @@
+import type { SopsKeyServiceOptions } from "./keyservice-options.js";
 import type { SopsDocumentFormat } from "./document.js";
 import { type MaybeRedactedString, revealString } from "./input.js";
 import type { SopsCliFormat, SopsCommandRequest } from "./sops.js";
@@ -7,7 +8,7 @@ type SopsCommandSource = Pick<
   "path" | "content" | "url"
 >;
 
-interface SopsCommandOptions {
+interface SopsCommandOptions extends SopsKeyServiceOptions {
   readonly cwd?: MaybeRedactedString;
   readonly format?: SopsDocumentFormat;
   readonly inputType?: SopsCliFormat;
@@ -58,6 +59,8 @@ export const buildSopsCommandRequest = ({
     options.ageKeyFile !== undefined
       ? { env }
       : {}),
+    ...(options.keyServices !== undefined ? { keyServices: options.keyServices } : {}),
+    ...(options.enableLocalKeyService !== undefined ? { enableLocalKeyService: options.enableLocalKeyService } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   };
 };

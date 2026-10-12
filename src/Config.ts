@@ -1,3 +1,4 @@
+import type { SopsKeyServiceOptions } from "./keyservice-options.js";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -27,7 +28,7 @@ import { buildSopsCommandRequest } from "./source.js";
  * than `SecretStringInput` because a config provider is consulted before any
  * Effect services exist.
  */
-export interface SopsConfigOptions {
+export interface SopsConfigOptions extends SopsKeyServiceOptions {
   readonly path?: string;
   readonly content?: string | Redacted.Redacted<string>;
   readonly url?: string | Redacted.Redacted<string>;

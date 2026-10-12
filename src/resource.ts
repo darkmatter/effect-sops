@@ -1,3 +1,4 @@
+import { keyServiceSettings, type SopsKeyServiceOptions } from "./keyservice-options.js";
 import type { Resource as AlchemyResource } from "alchemy";
 import { Resource } from "alchemy";
 import * as Diff from "alchemy/Diff";
@@ -88,7 +89,7 @@ export type RedactSecretLeaves<T> = T extends ReadonlyArray<infer U>
  */
 export type SopsRedactedDocument<T> = RedactSecretLeaves<OmitSopsMetadata<T>>;
 
-export interface SopsFileOptions<R = never> {
+export interface SopsFileOptions<R = never> extends SopsKeyServiceOptions {
   readonly path?: SecretStringInput<R> | readonly SecretStringInput<R>[];
   readonly content?: SecretStringInput<R>;
   readonly url?: SecretStringInput<R>;
@@ -121,7 +122,7 @@ export interface SopsFileOptions<R = never> {
   readonly retry?: SopsRetryOptions;
 }
 
-export interface SopsFileProps {
+export interface SopsFileProps extends SopsKeyServiceOptions {
   readonly path?: MaybeRedactedString | readonly MaybeRedactedString[];
   readonly content?: MaybeRedactedString;
   readonly url?: MaybeRedactedString;
@@ -386,6 +387,8 @@ const normalizeOptions = <R>(
       ...(extract ? { extract } : {}),
       ...(ageKey ? { ageKey } : {}),
       ...(ageKeyFile ? { ageKeyFile } : {}),
+      ...(options.keyServices !== undefined ? { keyServices: [...options.keyServices] } : {}),
+      ...(options.enableLocalKeyService !== undefined ? { enableLocalKeyService: options.enableLocalKeyService } : {}),
       ...(options.secrets ? { secrets: options.secrets } : {}),
     };
   }).pipe(Effect.orDie);
@@ -705,6 +708,7 @@ const hashLoadedSource = (
             secrets: props.secrets,
             schemaKey: props.schemaKey,
             providerVersion: PROVIDER_VERSION,
+            keyService: keyServiceSettings(buildSopsCommandRequest({ source: {}, options: props })),
             types: props.types,
           }),
         ),
