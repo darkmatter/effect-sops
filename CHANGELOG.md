@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Native keyservice timeouts now interrupt stalled local identity discovery and
+  document decryption. Effect scopes release gRPC clients and erase recovered
+  data keys on completion, failure, timeout, and interruption.
+
 ### Added
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node
 - Document MAC verification on the keyservice path, bounded RPC deadlines,

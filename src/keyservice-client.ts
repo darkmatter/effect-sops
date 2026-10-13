@@ -1,5 +1,6 @@
 import { Client, credentials } from "@grpc/grpc-js";
 import { parse } from "protobufjs";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 // Age-only subset of getsops/sops/keyservice/keyservice.proto. Field numbers
@@ -54,15 +55,14 @@ export const keyServiceTarget = (uri: string): string => {
   );
 };
 
-export const unwrapRemoteAgeKey = (
-  target: string,
-  entry: AgeRecipient,
-  signal: AbortSignal,
-  deadline: number,
-): Promise<Uint8Array> =>
-  new Promise((resolve, reject) => {
-    signal.throwIfAborted();
-    const client = new Client(target, credentials.createInsecure());
+export const unwrapRemoteAgeKey = Effect.fn(
+  "SopsKeyService.unwrapRemoteAgeKey",
+)(function* (target: string, entry: AgeRecipient, deadline: number) {
+  const client = yield* Effect.acquireRelease(
+    Effect.sync(() => new Client(target, credentials.createInsecure())),
+    (client) => Effect.sync(() => client.close()),
+  );
+  return yield* Effect.callback<Uint8Array, Error>((resume, signal) => {
     const call = client.makeUnaryRequest(
       "/KeyService/Decrypt",
       (value: AgeRecipient) =>
@@ -78,22 +78,29 @@ export const unwrapRemoteAgeKey = (
       entry,
       { deadline },
       (error, response) => {
-        signal.removeEventListener("abort", abort);
-        client.close();
+        // A response arriving after cancellation must not retain key material.
+        if (signal.aborted) {
+          response?.plaintext.fill(0);
+          return;
+        }
         if (error)
-          reject(
-            new Error(`Keyservice RPC failed (gRPC status ${error.code})`),
-          );
-        else if (!response || response.plaintext.length !== 32)
-          reject(
-            new Error(
-              "Keyservice returned an invalid data key; expected 32 bytes",
+          resume(
+            Effect.fail(
+              new Error(`Keyservice RPC failed (gRPC status ${error.code})`),
             ),
           );
-        else resolve(response.plaintext);
+        else if (!response || response.plaintext.length !== 32) {
+          response?.plaintext.fill(0);
+          resume(
+            Effect.fail(
+              new Error(
+                "Keyservice returned an invalid data key; expected 32 bytes",
+              ),
+            ),
+          );
+        } else resume(Effect.succeed(response.plaintext));
       },
     );
-    const abort = () => call.cancel();
-    signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) abort();
+    return Effect.sync(() => call.cancel());
   });
+}, Effect.scoped);

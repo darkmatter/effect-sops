@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   Client,
   credentials,
@@ -10,12 +10,15 @@ import {
 } from "@grpc/grpc-js";
 import { parse } from "protobufjs";
 import { Decrypter, armor } from "age-encryption";
+import * as SopsAge from "@drkmttr/sops-age";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Schema from "effect/Schema";
@@ -399,6 +402,78 @@ test("deadline cancels a stalled request", () =>
     },
     () => {},
   ));
+
+test("overall timeout interrupts stalled local identity discovery", async () => {
+  const started = Deferred.makeUnsafe<void>();
+  const pending = Promise.withResolvers<string[]>();
+  const discovery = spyOn(SopsAge, "findAllAgeKeys").mockImplementation(() => {
+    Deferred.doneUnsafe(started, Effect.void);
+    return pending.promise;
+  });
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const fiber = yield* runSopsAge({
+          ...request("tcp://127.0.0.1:1"),
+          enableLocalKeyService: true,
+          timeoutMs: 50,
+        }).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust(50);
+        const error = yield* Fiber.join(fiber).pipe(Effect.flip);
+        expect(error._tag).toBe("SopsDecryptError");
+        expect(error.message).toBe(
+          "Native keyservice decryption timed out after 50ms",
+        );
+      }).pipe(Effect.provide(TestClock.layer())),
+    );
+  } finally {
+    pending.resolve([]);
+    discovery.mockRestore();
+  }
+});
+
+test.each(["timeout", "interruption"] as const)(
+  "%s during document decryption releases the recovered data key",
+  (mode) =>
+    withServer(async (uri) => {
+      const started = Deferred.makeUnsafe<Uint8Array>();
+      const pending = Promise.withResolvers<void>();
+      const decrypt = spyOn(SopsAge, "decryptSops").mockImplementation(
+        (_input, options?: SopsAge.DecryptSopsOptions) => {
+          if (!options?.dataKey)
+            throw new Error("Expected a recovered data key");
+          Deferred.doneUnsafe(started, Effect.succeed(options.dataKey));
+          return pending.promise;
+        },
+      );
+      try {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const fiber = yield* runSopsAge({
+              ...request(uri),
+              timeoutMs: 1_000,
+            }).pipe(Effect.forkChild);
+            const dataKey = yield* Deferred.await(started);
+            expect(dataKey.some((byte) => byte !== 0)).toBe(true);
+            if (mode === "timeout") {
+              yield* TestClock.adjust(1_000);
+              const error = yield* Fiber.join(fiber).pipe(Effect.flip);
+              expect(error.message).toBe(
+                "Native keyservice decryption timed out after 1000ms",
+              );
+            } else {
+              yield* Fiber.interrupt(fiber);
+            }
+            expect(dataKey).toEqual(new Uint8Array(32));
+          }).pipe(Effect.provide(TestClock.layer())),
+        );
+      } finally {
+        pending.resolve();
+        decrypt.mockRestore();
+      }
+    }),
+);
 
 test("Effect interruption cancels the in-flight RPC", async () => {
   const started = Promise.withResolvers<void>();

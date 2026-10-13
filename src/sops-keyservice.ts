@@ -12,33 +12,55 @@ import {
 } from "./decrypt.js";
 import { SopsDecryptError } from "./errors.js";
 import { keyServiceSettings } from "./keyservice-options.js";
-import { keyServiceTarget, unwrapRemoteAgeKey } from "./keyservice-client.js";
+import {
+  keyServiceTarget,
+  unwrapRemoteAgeKey,
+  type AgeRecipient,
+} from "./keyservice-client.js";
 import {
   parseKeyServiceDocument,
   verifyKeyServiceMac,
 } from "./keyservice-document.js";
 import { encodeDecryptedValue, normalizeSopsExtract } from "./sops-age-core.js";
 
+const asError = (cause: unknown): Error =>
+  cause instanceof Error
+    ? cause
+    : new Error("Native keyservice decryption failed");
+
 export const runSopsKeyService: SopsDecrypt = Effect.fn(
   "SopsKeyService.decrypt",
-)((request: SopsCommandRequest) =>
-  Effect.tryPromise({
-    try: (signal) => decryptWithKeyService(request, signal),
-    catch: (cause) =>
-      new SopsDecryptError({
-        message:
-          cause instanceof Error
-            ? cause.message
-            : "Native keyservice decryption failed",
-        path: requestLabel(request),
+)(
+  function* (request: SopsCommandRequest) {
+    const settings = yield* Effect.try({
+      try: () => validateRequest(request),
+      catch: asError,
+    });
+    return yield* decryptWithKeyService(request, settings).pipe(
+      Effect.timeoutOrElse({
+        duration: settings.timeoutMs,
+        orElse: () =>
+          Effect.fail(
+            new Error(
+              `Native keyservice decryption timed out after ${settings.timeoutMs}ms`,
+            ),
+          ),
       }),
-  }),
+    );
+  },
+  (effect, request) =>
+    effect.pipe(
+      Effect.mapError(
+        (cause) =>
+          new SopsDecryptError({
+            message: cause.message,
+            path: requestLabel(request),
+          }),
+      ),
+    ),
 );
 
-const decryptWithKeyService = async (
-  request: SopsCommandRequest,
-  interrupted: AbortSignal,
-): Promise<string> => {
+const validateRequest = (request: SopsCommandRequest) => {
   if (request.args?.length)
     throw new Error(
       "Custom sopsArgs are not supported by native keyservice decryption",
@@ -73,91 +95,118 @@ const decryptWithKeyService = async (
   const timeoutMs = request.timeoutMs ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
     throw new Error("Keyservice timeoutMs must be positive");
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), timeoutMs);
-  const signal = AbortSignal.any([interrupted, timeout.signal]);
-  const deadline = Date.now() + timeoutMs;
-  let dataKey: Uint8Array | undefined;
-  try {
-    const content = await loadContent(request, signal);
+  return { local, targets, timeoutMs };
+};
+
+const decryptWithKeyService = Effect.fn("SopsKeyService.decryptDocument")(
+  function* (
+    request: SopsCommandRequest,
+    settings: ReturnType<typeof validateRequest>,
+  ) {
+    // gRPC deadlines use wall time; Effect owns the overall operation timeout.
+    const deadline = Date.now() + settings.timeoutMs;
+    const content = yield* Effect.tryPromise({
+      try: (signal) => loadContent(request, signal),
+      catch: asError,
+    });
     // Input and output formats are independent. Let the parser detect the input
     // when the request only specifies an output format (usual resource path).
-    const document = parseKeyServiceDocument(content, request.inputType);
-    if (local) {
-      let keys: string[] = [];
-      try {
-        keys = await localKeys(request, signal);
-      } catch {
-        /* remote recovery may still succeed */
-      }
-      for (const entry of document.metadata.age) {
-        signal.throwIfAborted();
-        try {
-          const decrypter = new Decrypter();
-          for (const key of keys) {
-            try {
-              decrypter.addIdentity(key);
-            } catch {
-              /* Another identity may be usable. */
-            }
-          }
-          const candidate = await decrypter.decrypt(
-            armor.decode(entry.enc),
-            "uint8array",
-          );
-          if (candidate.length === 32) {
-            dataKey = candidate;
-            break;
-          }
-        } catch {
-          /* Try the next recipient without exposing identity errors. */
-        }
-      }
-    }
-    const failures: string[] = [];
-    if (!dataKey) {
-      for (const entry of document.metadata.age) {
-        for (const target of targets) {
-          signal.throwIfAborted();
-          try {
-            dataKey = await unwrapRemoteAgeKey(target, entry, signal, deadline);
-            break;
-          } catch (cause) {
-            failures.push(
-              cause instanceof Error ? cause.message : "Keyservice RPC failed",
-            );
-          }
-        }
-        if (dataKey) break;
-      }
-    }
-    signal.throwIfAborted();
-    if (!dataKey)
-      throw new Error(
-        `Could not recover the SOPS data key${failures.length ? `: ${[...new Set(failures)].join("; ")}` : " with local age identities"}`,
-      );
-    verifyKeyServiceMac(document, dataKey);
+    const document = yield* Effect.try({
+      try: () => parseKeyServiceDocument(content, request.inputType),
+      catch: asError,
+    });
+    const dataKey = yield* Effect.acquireRelease(
+      recoverDataKey(request, document.metadata.age, settings, deadline),
+      (key) => Effect.sync(() => key.fill(0)),
+      // Key recovery performs I/O and must remain interruptible during acquisition.
+      { interruptible: true },
+    );
+    yield* Effect.try({
+      try: () => verifyKeyServiceMac(document, dataKey),
+      catch: asError,
+    });
     // Normalize metadata once; preserves mac_only_encrypted for verification,
     // including dotenv metadata that the dependency otherwise drops.
-    const decrypted: unknown = await decryptSops(document.root, {
-      dataKey,
-      ...(request.extract
-        ? { keyPath: normalizeSopsExtract(request.extract) }
-        : {}),
+    const decrypted: unknown = yield* Effect.tryPromise({
+      try: () =>
+        decryptSops(document.root, {
+          dataKey,
+          ...(request.extract
+            ? { keyPath: normalizeSopsExtract(request.extract) }
+            : {}),
+        }),
+      catch: asError,
     });
-    signal.throwIfAborted();
-    return encodeDecryptedValue(decrypted, request.outputType);
-  } catch (cause) {
-    if (timeout.signal.aborted)
-      throw new Error(
-        `Native keyservice decryption timed out after ${timeoutMs}ms`,
+    return yield* Effect.try({
+      try: () => encodeDecryptedValue(decrypted, request.outputType),
+      catch: asError,
+    });
+  },
+  Effect.scoped,
+);
+
+const recoverDataKey = Effect.fn("SopsKeyService.recoverDataKey")(function* (
+  request: SopsCommandRequest,
+  recipients: readonly AgeRecipient[],
+  settings: ReturnType<typeof validateRequest>,
+  deadline: number,
+) {
+  if (settings.local) {
+    const keys = yield* Effect.tryPromise({
+      try: (signal) => localKeys(request, signal),
+      catch: asError,
+    }).pipe(Effect.orElseSucceed((): string[] => []));
+    for (const entry of recipients) {
+      const key = yield* unwrapLocalAgeKey(entry, keys).pipe(
+        Effect.orElseSucceed(() => undefined),
       );
-    throw cause;
-  } finally {
-    clearTimeout(timer);
-    dataKey?.fill(0);
+      if (key) return key;
+    }
   }
-};
+  const failures: string[] = [];
+  for (const entry of recipients) {
+    for (const target of settings.targets) {
+      const key = yield* unwrapRemoteAgeKey(target, entry, deadline).pipe(
+        Effect.orElseSucceed((error) => {
+          failures.push(error.message);
+          return undefined;
+        }),
+      );
+      if (key) return key;
+    }
+  }
+  return yield* Effect.fail(
+    new Error(
+      `Could not recover the SOPS data key${failures.length ? `: ${[...new Set(failures)].join("; ")}` : " with local age identities"}`,
+    ),
+  );
+});
+
+const unwrapLocalAgeKey = (entry: AgeRecipient, keys: readonly string[]) =>
+  Effect.tryPromise({
+    try: async (signal) => {
+      const decrypter = new Decrypter();
+      for (const key of keys) {
+        try {
+          decrypter.addIdentity(key);
+        } catch {
+          /* Another identity may be usable. */
+        }
+      }
+      const candidate = await decrypter.decrypt(
+        armor.decode(entry.enc),
+        "uint8array",
+      );
+      // The age library cannot cancel crypto work. Erase any result arriving
+      // after interruption, before it can escape the Promise adapter.
+      if (signal.aborted || candidate.length !== 32) {
+        candidate.fill(0);
+        throw new Error("Local age identity did not recover a valid data key");
+      }
+      return candidate;
+    },
+    catch: asError,
+  });
 
 const loadContent = async (
   request: SopsCommandRequest,

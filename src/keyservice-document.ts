@@ -2,6 +2,9 @@ import { parse as parseDotenv } from "dotenv";
 import { parse as parseYaml } from "yaml";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Base64 from "effect/encoding/Base64";
+import * as Hex from "effect/encoding/Hex";
 import { gcm } from "@noble/ciphers/aes";
 import { sha512 } from "@noble/hashes/sha2";
 import type { SopsCliFormat } from "./decrypt.js";
@@ -111,7 +114,10 @@ const dotenvDocument = (content: string): Record<string, unknown> => {
 };
 
 const decodeBase64 = (value: string): Uint8Array =>
-  Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
+  Result.getOrThrowWith(
+    Base64.decode(value),
+    () => new Error("Invalid Base64 in SOPS encrypted scalar"),
+  );
 
 const decryptScalar = (value: string, key: Uint8Array, aad: string) => {
   const match =
@@ -222,10 +228,7 @@ export const verifyKeyServiceMac = (
   };
   for (const [key, value] of Object.entries(root))
     if (key !== "sops") walk(value, [key]);
-  const computed = [...hash.digest()]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .toUpperCase();
+  const computed = Hex.encode(hash.digest()).toUpperCase();
   const stored = decryptScalar(metadata.mac, dataKey, metadata.lastmodified);
   if (
     stored.type !== "str" ||
