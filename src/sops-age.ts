@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import { requestLabel, type SopsDecrypt } from "./decrypt.js";
+import { withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import { usesKeyServices } from "./keyservice-options.js";
 import { runSopsAge as runLocalAge } from "./sops-age-core.js";
@@ -13,10 +14,11 @@ export const runSopsAge: SopsDecrypt = (request) =>
     return Effect.flatMap(
       Effect.tryPromise({
         try: () => import("./sops-keyservice.js"),
-        catch: () =>
+        catch: (cause) =>
           new SopsDecryptError({
-            message: "Could not load the native keyservice transport",
+            message: withErrorDetail("Could not load the native keyservice transport", cause),
             path: requestLabel(request),
+            cause,
           }),
       }),
       ({ runSopsKeyService }) => runSopsKeyService(request),

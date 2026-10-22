@@ -3,6 +3,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as SchemaAST from "effect/SchemaAST";
 
+import { withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import type { SopsDecrypt } from "./decrypt.js";
 import type { SopsKeyServiceOptions } from "./keyservice-options.js";
@@ -108,9 +109,10 @@ const stringifyEncryptedJson = (
       }
       return content;
     },
-    catch: () =>
+    catch: (cause) =>
       new SopsDecryptError({
-        message: "Failed to serialize encrypted SOPS JSON",
+        message: withErrorDetail("Failed to serialize encrypted SOPS JSON", cause),
         path: "<inline>",
+        cause,
       }),
   });

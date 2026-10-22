@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import * as Effect from "effect/Effect";
 
+import { withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import {
   buildSopsArgs,
@@ -17,7 +18,7 @@ export const runSopsCli: SopsDecrypt = (request) =>
       cause instanceof SopsDecryptError
         ? cause
         : new SopsDecryptError({
-            message: "Failed to run sops",
+            message: withErrorDetail("Failed to run sops", cause),
             path: requestLabel(request),
             cause,
           }),
@@ -63,7 +64,7 @@ const runSopsCliPromise = (request: SopsCommandRequest): Promise<string> =>
       if (timeout) clearTimeout(timeout);
       reject(
         new SopsDecryptError({
-          message: `Failed to start sops binary "${request.binary}"`,
+          message: withErrorDetail(`Failed to start sops binary "${request.binary}"`, cause),
           path: requestLabel(request),
           cause,
         }),
@@ -73,7 +74,7 @@ const runSopsCliPromise = (request: SopsCommandRequest): Promise<string> =>
       if (timeout) clearTimeout(timeout);
       if (timedOut) {
         const error = {
-          message: `sops timed out after ${request.timeoutMs}ms`,
+          message: withErrorDetail(`sops timed out after ${request.timeoutMs}ms`, stderr.trim()),
           path: requestLabel(request),
           ...(exitCode === null ? {} : { exitCode }),
           ...(stderr.trim() ? { stderr: stderr.trim() } : {}),
@@ -86,7 +87,7 @@ const runSopsCliPromise = (request: SopsCommandRequest): Promise<string> =>
         return;
       }
       const error = {
-        message: `sops exited with code ${exitCode}`,
+        message: withErrorDetail(`sops exited with code ${exitCode}`, stderr.trim()),
         path: requestLabel(request),
         ...(exitCode === null ? {} : { exitCode }),
         ...(stderr.trim() ? { stderr: stderr.trim() } : {}),

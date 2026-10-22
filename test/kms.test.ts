@@ -117,6 +117,7 @@ test("unwrap failures are aggregated and surfaced", async () => {
   if (Exit.isFailure(exit)) {
     const text = String(exit.cause);
     expect(text).toContain("Could not unwrap the SOPS data key");
+    expect(text).toContain("AccessDeniedException");
   }
 });
 

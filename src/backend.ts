@@ -2,6 +2,7 @@ import { usesKeyServices } from "./keyservice-options.js";
 import * as Effect from "effect/Effect";
 
 import type { SopsDocumentFormat } from "./document.js";
+import { errorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import { runSopsAge, runSopsCli, type SopsBackend, type SopsDecrypt } from "./sops.js";
 
@@ -40,8 +41,10 @@ export const runSopsAgeWithCliFallback: SopsDecrypt = (request) =>
             (cliError) =>
               Effect.fail(
                 new SopsDecryptError({
-                  message: "Both sops-age and the sops CLI failed to decrypt",
+                  message: `Both sops-age and the sops CLI failed to decrypt (${errorDetail({ nativeError, cliError })})`,
                   path: request.path ?? "<inline>",
+                  ...(cliError.exitCode === undefined ? {} : { exitCode: cliError.exitCode }),
+                  ...(cliError.stderr ? { stderr: cliError.stderr } : {}),
                   cause: { nativeError, cliError },
                 }),
               ),

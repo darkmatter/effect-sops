@@ -10,6 +10,7 @@ import {
   type SopsCommandRequest,
   type SopsDecrypt,
 } from "./decrypt.js";
+import { errorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import { keyServiceSettings } from "./keyservice-options.js";
 import {
@@ -53,8 +54,9 @@ export const runSopsKeyService: SopsDecrypt = Effect.fn(
       Effect.mapError(
         (cause) =>
           new SopsDecryptError({
-            message: cause.message,
+            message: errorDetail(cause) || cause.message,
             path: requestLabel(request),
+            cause,
           }),
       ),
     ),
