@@ -7,6 +7,13 @@
 - Native keyservice timeouts now interrupt stalled local identity discovery and
   document decryption. Effect scopes release gRPC clients and erase recovered
   data keys on completion, failure, timeout, and interruption.
+- Decrypt failures now carry the reason in their message: sops CLI exit and
+  timeout errors include the (collapsed, length-capped) stderr, the
+  sops-age/CLI fallback names both backends' reasons, KMS unwrap failures
+  list each key's error, and the Config provider's `SourceError` appends the
+  backend detail to the source label. Parse and schema errors over decrypted
+  content stay generic so secret values cannot leak into logs, and age
+  secret keys echoed by a backend are redacted.
 
 ### Added
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node

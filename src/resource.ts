@@ -30,6 +30,7 @@ import {
   SopsSecretPathError,
   type SopsError,
 } from "./errors.js";
+import { withErrorDetail } from "./error-detail.js";
 import {
   type MaybeRedactedString,
   type SecretStringInput,
@@ -480,6 +481,8 @@ const parseDecryptedDocument = (
   SopsParseError | SopsError
 > =>
   Effect.gen(function* () {
+    // Parse/materialize/schema failures below stay generic on purpose: they
+    // run against decrypted content and their causes can quote secret values.
     const parsed = yield* Effect.try({
       try: () =>
         parseSecretDocument(plaintext, {
@@ -681,7 +684,10 @@ const loadEncryptedSource = (
     },
     catch: (cause) =>
       new SopsFileReadError({
-        message: `Failed to read encrypted SOPS source: ${sourceLabel(props)}`,
+        message: withErrorDetail(
+          `Failed to read encrypted SOPS source: ${sourceLabel(props)}`,
+          cause,
+        ),
         path: sourceLabel(props),
         cause,
       }),
@@ -715,7 +721,10 @@ const hashLoadedSource = (
       ]),
     catch: (cause) =>
       new SopsFileReadError({
-        message: `Failed to hash encrypted SOPS source: ${source.label}`,
+        message: withErrorDetail(
+          `Failed to hash encrypted SOPS source: ${source.label}`,
+          cause,
+        ),
         path: source.label,
         cause,
       }),

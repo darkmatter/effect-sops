@@ -13,6 +13,7 @@
  * Not verified: the document-level `sops.mac` (same as the age backend).
  * Each leaf is still authenticated by its GCM tag and its path.
  */
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import { decryptSops } from "@drkmttr/sops-age";
@@ -24,6 +25,7 @@ import {
   type SopsCommandRequest,
   type SopsDecrypt,
 } from "./decrypt.js";
+import { errorDetail, withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import { encodeDecryptedValue, normalizeSopsExtract } from "./sops-age-core.js";
 
@@ -111,7 +113,7 @@ export const runSopsKms =
         });
       }
 
-      const failures: unknown[] = [];
+      const failures: Array<{ arn: string; cause: Cause.Cause<unknown> }> = [];
       let dataKey: Uint8Array | undefined;
       for (const entry of entries) {
         const attempt = yield* Effect.exit(options.unwrapDataKey(entry));
@@ -122,8 +124,16 @@ export const runSopsKms =
         failures.push({ arn: entry.arn, cause: attempt.cause });
       }
       if (!dataKey) {
+        const detail = failures
+          .map((failure) => {
+            const reason = errorDetail(Cause.squash(failure.cause));
+            return reason ? `${failure.arn}: ${reason}` : failure.arn;
+          })
+          .join("; ");
         return yield* new SopsDecryptError({
-          message: `Could not unwrap the SOPS data key with any of ${entries.length} KMS key(s)`,
+          message: detail
+            ? `Could not unwrap the SOPS data key with any of ${entries.length} KMS key(s) (${detail})`
+            : `Could not unwrap the SOPS data key with any of ${entries.length} KMS key(s)`,
           path: label,
           cause: failures,
         });
@@ -138,11 +148,13 @@ export const runSopsKms =
           }),
         catch: (cause) =>
           new SopsDecryptError({
-            message: "Failed to decrypt SOPS values with the unwrapped data key",
+            message: withErrorDetail("Failed to decrypt SOPS values with the unwrapped data key", cause),
             path: label,
             cause,
           }),
       });
+      // Encoding operates on decrypted values, so its failure stays generic:
+      // an encoder error could quote the value it failed on.
       return yield* Effect.try({
         try: () => encodeDecryptedValue(decrypted, request.outputType ?? request.inputType),
         catch: (cause) =>

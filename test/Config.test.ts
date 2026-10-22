@@ -1,8 +1,12 @@
 import { expect, test } from "bun:test";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Redacted from "effect/Redacted";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import * as SopsConfig from "../src/Config.ts";
 import { SopsDecryptError } from "../src/errors.ts";
@@ -15,6 +19,37 @@ const source = {
   json: nativeEncrypted,
   ageKey: Redacted.make(AGE_SECRET_KEY),
 } as const;
+// A throwaway identity that is not a recipient of the fixture.
+const WRONG_AGE_SECRET_KEY =
+  "AGE-SECRET-KEY-1Y9DUG8247C74EHHWK2242TTHR7JMNWHX2E4LTQ4XD6548T7AW05QDEG6JV";
+
+const fixturePath = join(import.meta.dir, "fixtures/native.enc.json");
+
+const STDERR = "Failed to get the data key required to decrypt the SOPS file.";
+
+const makeFailingSops = async (name: string): Promise<string> => {
+  const dir = join(import.meta.dir, ".tmp", name);
+  const binary = join(dir, "sops-fake");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    binary,
+    [
+      "#!/usr/bin/env bun",
+      `process.stderr.write(${JSON.stringify(`${STDERR}\n`)});`,
+      "process.exit(128);",
+    ].join("\n"),
+  );
+  await chmod(binary, 0o755);
+  return binary;
+};
+
+const failureMessage = async (provider: ConfigProvider.ConfigProvider): Promise<string> => {
+  const exit = await Effect.runPromiseExit(resolve(apiToken, provider));
+  expect(Exit.isFailure(exit)).toBe(true);
+  if (!Exit.isFailure(exit)) return "";
+  const error: unknown = Cause.squash(exit.cause);
+  return error instanceof Error ? error.message : String(error);
+};
 
 // A `Config` is itself an `Effect`, so supplying the provider is all a lookup
 // needs.
@@ -117,6 +152,7 @@ test("a decrypt failure surfaces the source label without leaking content", asyn
   );
 
   expect(String(result)).toContain("secrets.sops.json");
+  expect(String(result)).toContain("no identity matched");
   expect(String(result)).not.toContain("native-token");
 });
 
@@ -144,4 +180,38 @@ test("provideCredentials wires both stack layers without eager decryption", asyn
   expect(stack.providers).toBeDefined();
   expect(stack.state).toBeDefined();
   expect(decryptions).toBe(0);
+});
+
+test("a failing sops CLI surfaces its stderr in the config error message", async () => {
+  const sopsBinary = await makeFailingSops("config-cli-failure");
+
+  const message = await failureMessage(
+    SopsConfig.make({ path: fixturePath, backend: "cli", sopsBinary, keyServices: [] }),
+  );
+
+  expect(message).toContain(
+    `Failed to read SOPS config from ${fixturePath}: sops exited with code 128: ${STDERR}`,
+  );
+  expect(message).not.toContain("\n");
+  expect(message).not.toContain("native-token");
+});
+
+test("the auto fallback message names both backends and their reasons", async () => {
+  const sopsBinary = await makeFailingSops("config-fallback-failure");
+
+  const message = await failureMessage(
+    SopsConfig.make({
+      path: fixturePath,
+      sopsBinary,
+      keyServices: [],
+      ageKey: Redacted.make(WRONG_AGE_SECRET_KEY),
+    }),
+  );
+
+  expect(message).toContain(
+    "Both sops-age and the sops CLI failed to decrypt (sops-age: Failed to decrypt SOPS content with sops-age:",
+  );
+  expect(message).toContain(`; sops CLI: sops exited with code 128: ${STDERR})`);
+  expect(message).not.toContain("native-token");
+  expect(message).not.toContain(WRONG_AGE_SECRET_KEY);
 });

@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 
+import { withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 import { requestLabel, type SopsDecrypt } from "./decrypt.js";
 
@@ -21,7 +22,7 @@ export const runSopsCli: SopsDecrypt = (request) =>
       try: () => import("./sops-cli.js"),
       catch: (cause) =>
         new SopsDecryptError({
-          message: "Failed to load the sops CLI backend",
+          message: withErrorDetail("Failed to load the sops CLI backend", cause),
           path: requestLabel(request),
           cause,
         }),

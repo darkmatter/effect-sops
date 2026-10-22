@@ -10,6 +10,7 @@ import {
   type SopsCommandRequest,
   type SopsDecrypt,
 } from "./decrypt.js";
+import { withErrorDetail } from "./error-detail.js";
 import { SopsDecryptError } from "./errors.js";
 
 type SopsAgeFileType = NonNullable<DecryptSopsOptions["fileType"]>;
@@ -21,7 +22,7 @@ export const runSopsAge: SopsDecrypt = (request) =>
       cause instanceof SopsDecryptError
         ? cause
         : new SopsDecryptError({
-            message: "Failed to decrypt SOPS content with sops-age",
+            message: withErrorDetail("Failed to decrypt SOPS content with sops-age", cause),
             path: requestLabel(request),
             cause,
           }),

@@ -11,6 +11,7 @@ import {
   type SecretTree,
   type SopsDocumentFormat,
 } from "./document.js";
+import { withErrorDetail } from "./error-detail.js";
 import {
   memoizeDecrypt,
   type SopsBackend,
@@ -101,12 +102,16 @@ export const make = (options: SopsConfigOptions): ConfigProvider.ConfigProvider 
         cached = ConfigProvider.fromUnknown(root);
         return cached;
       }),
-      // The failure carries the source label but never decrypted content, so a
-      // config error cannot leak secret material into logs.
+      // The failure carries the source label and the (secret-free) backend
+      // detail, but never decrypted content, so a config error cannot leak
+      // secret material into logs.
       Effect.mapError(
         (cause) =>
           new ConfigProvider.SourceError({
-            message: `Failed to read SOPS config from ${sourceLabel(options)}`,
+            message: withErrorDetail(
+              `Failed to read SOPS config from ${sourceLabel(options)}`,
+              cause,
+            ),
             cause,
           }),
       ),
