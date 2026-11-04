@@ -89,7 +89,7 @@
     "alchemy": "2.0.0-beta.83",
     "effect": "4.0.6",
     "expect-type": "1.4.0",
-    "release-it": "21.1.1",
+    "release-it": "21.1.2",
     "typescript": "^7.0.0"
   },
   "peerDependencies": {
