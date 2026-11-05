@@ -36,12 +36,17 @@ and non-age backends.
 bun add effect-sops effect
 ```
 
-`effect` is a required peer. `alchemy` is optional and is only needed when you
-import the package root for `SopsFile` or the Cloudflare Secrets Store API:
+`effect` is a required peer. `alchemy` and `@alchemy.run/github` are optional
+and are only needed when you import the package root for `SopsFile`, the
+Cloudflare Secrets Store API, or GitHub Actions secrets:
 
 ```sh
-bun add alchemy
+bun add alchemy @alchemy.run/github
 ```
+
+Alchemy's cloud providers ship as separate packages. Install
+`@alchemy.run/cloudflare` when your stack uses `Cloudflare.providers()` or
+Cloudflare resources.
 
 The native backend does not require a `sops` binary. Install `sops` only when
 you need `backend: "cli"` or automatic fallback for SOPS features not supported
@@ -370,7 +375,7 @@ exported variables.
 ```ts
 import * as SopsConfig from "effect-sops/Config";
 import * as Alchemy from "alchemy";
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@alchemy.run/cloudflare";
 
 export default Alchemy.Stack(
   "MyApp",
@@ -448,7 +453,7 @@ A stack using the Action needs:
 
 ```ts
 import * as Alchemy from "alchemy";
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@alchemy.run/cloudflare";
 import { CloudflareSopsSecrets, cloudflareSopsWorkerBindings } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -559,7 +564,7 @@ repositories or `public_repo` for public repositories.
 
 ```ts
 import * as Alchemy from "alchemy";
-import * as GitHub from "alchemy/GitHub";
+import * as GitHub from "@alchemy.run/github";
 import { GitHubSopsSecrets, SopsFileProvider } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -714,7 +719,7 @@ assignable to the `Output<…>` expected by `alchemy/Output` helpers (for exampl
 
 **Cause:** Two copies of `alchemy` are installed. `effect-sops` decrypts via one
 instance (for example the version pulled in as its dependency), while your stack
-imports `alchemy`, `alchemy/Cloudflare`, and `alchemy/Output` from another.
+imports `alchemy`, `@alchemy.run/cloudflare`, and `alchemy/Output` from another.
 `Output` is not portable across versions — even patch differences in the Effect
 runtime context break assignability.
 

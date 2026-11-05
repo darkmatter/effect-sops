@@ -1,7 +1,7 @@
 import { afterAll, expect, test as bunTest } from "bun:test";
 import * as Credentials from "@distilled.cloud/cloudflare/Credentials";
 import { Retry } from "@distilled.cloud/cloudflare";
-import * as GitHub from "alchemy/GitHub";
+import * as GitHub from "@alchemy.run/github";
 import * as Provider from "alchemy/Provider";
 import * as Test from "alchemy/Test/Bun";
 import { SopsFileProvider } from "effect-sops";
