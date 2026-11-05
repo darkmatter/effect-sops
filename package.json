@@ -83,6 +83,8 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare": "2.0.0-beta.84",
+    "@alchemy.run/github": "2.0.0-beta.84",
     "@distilled.cloud/cloudflare": "1.0.0-rc.13",
     "@effect/platform-bun": "4.0.6",
     "@types/bun": "^1.3.2",
@@ -93,11 +95,15 @@
     "typescript": "^7.0.0"
   },
   "peerDependencies": {
+    "@alchemy.run/github": "2.0.0-beta.84",
     "@distilled.cloud/cloudflare": "^1.0.0-rc.13",
     "alchemy": "2.0.0-beta.84",
     "effect": "^4.0.0"
   },
   "peerDependenciesMeta": {
+    "@alchemy.run/github": {
+      "optional": true
+    },
     "@distilled.cloud/cloudflare": {
       "optional": true
     },
