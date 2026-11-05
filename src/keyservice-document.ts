@@ -6,7 +6,7 @@ import * as Result from "effect/Result";
 import * as Base64 from "effect/encoding/Base64";
 import * as Hex from "effect/encoding/Hex";
 import { gcm } from "@noble/ciphers/aes";
-import { sha512 } from "@noble/hashes/sha2";
+import { sha512 } from "@noble/hashes/sha2.js";
 import type { SopsCliFormat } from "./decrypt.js";
 
 const Metadata = Schema.Struct({
