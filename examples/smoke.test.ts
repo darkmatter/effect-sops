@@ -99,7 +99,7 @@ const cloudflare = createMockCloudflare();
 const { test: cloudflareTest } = Test.make({
   providers: Layer.mergeAll(
     Credentials.fromApiToken({
-      apiToken: "test-token",
+      apiToken: Redacted.make("test-token"),
       apiBaseUrl: cloudflare.baseUrl,
     }),
     Layer.succeed(Retry.Retry, { while: () => false }),
