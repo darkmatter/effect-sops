@@ -5,7 +5,7 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Base64 from "effect/encoding/Base64";
 import * as Hex from "effect/encoding/Hex";
-import { gcm } from "@noble/ciphers/aes";
+import { gcm } from "@noble/ciphers/aes.js";
 import { sha512 } from "@noble/hashes/sha2";
 import type { SopsCliFormat } from "./decrypt.js";
 
