@@ -16,6 +16,12 @@
   secret keys echoed by a backend are redacted.
 
 ### Added
+
+- Native SOPS keyservice server with scoped Effect and closeable Promise APIs,
+  TCP and Unix listeners, terminal or macOS approval, remembered approvals,
+  age plugin PIN and touch support, Tailscale addresses, and SSH forwards.
+- Alchemy `SopsKeyService` and `SopsKeyServiceTunnel` resources, runnable
+  keyservice examples, and a manual YubiKey check.
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node
 - Document MAC verification on the keyservice path, bounded RPC deadlines,
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node and Bun, using the existing @drkmttr/sops-age data-key API. Schema, Config, resources, and Actions support SOPS_KEYSERVICE, SOPS_ENABLE_LOCAL_KEYSERVICE, and explicit per-call options
