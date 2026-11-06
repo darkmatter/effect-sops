@@ -1,0 +1,16 @@
+#!/usr/bin/env bun
+import { rename, writeFile } from "node:fs/promises";
+
+const log = process.env.FAKE_OSASCRIPT_LOG;
+if (log) await writeFile(log, JSON.stringify(process.argv.slice(2)));
+const pid = process.env.FAKE_OSASCRIPT_PID;
+if (pid) {
+  await writeFile(`${pid}.tmp`, String(process.pid));
+  await rename(`${pid}.tmp`, pid);
+}
+if (process.env.FAKE_OSASCRIPT_WAIT === "1") {
+  setInterval(() => {}, 60_000);
+  await new Promise(() => {});
+}
+process.stdout.write(`${process.env.FAKE_OSASCRIPT_RESPONSE ?? "{}"}\n`);
+process.exit(Number(process.env.FAKE_OSASCRIPT_EXIT ?? "0"));
