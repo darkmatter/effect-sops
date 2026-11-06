@@ -21,7 +21,11 @@ const recipient = Effect.gen(function* () {
   const config = Option.getOrElse(xdg, () => join(home, "Library/Application Support"));
   const path = Option.getOrElse(explicitFile, () => join(config, "sops/age/keys.txt"));
   const text = yield* fs.readFileString(path);
-  const match = /^\s*#\s*Recipient:\s*(age1yubikey1[a-z0-9]+)\s*$/im.exec(text);
+  // One anchored match per trimmed line keeps the scan linear.
+  const match = text
+    .split("\n")
+    .map((line) => /^#\s*Recipient:\s*(age1yubikey1[a-z0-9]+)$/i.exec(line.trim()))
+    .find((result) => result !== null);
   if (!match?.[1]) {
     return yield* Effect.fail(new Error(
       "Set AGE_YUBIKEY_RECIPIENT or add a YubiKey Recipient comment to the identity file.",

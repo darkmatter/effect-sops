@@ -123,6 +123,24 @@ const rpc = <Request, Response>(
     );
   });
 };
+// Nothing may answer at the URI. grpc-js fails fast on macOS (UNAVAILABLE)
+// but retries a missing Unix socket on Linux until the deadline.
+const expectUnreachable = async (uri: string): Promise<void> => {
+  const failure: unknown = await decrypt(uri, 100).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const code =
+    typeof failure === "object" && failure !== null && "code" in failure
+      ? failure.code
+      : undefined;
+  const unreachable: ReadonlyArray<unknown> = [
+    status.UNAVAILABLE,
+    status.DEADLINE_EXCEEDED,
+  ];
+  expect(unreachable).toContain(code);
+};
+
 const decrypt = (uri: string, timeout?: number) =>
   rpc(uri, keyServiceDefinition.Decrypt, { key: age, ciphertext }, timeout);
 const signal = () => {
@@ -772,9 +790,7 @@ describe("keyservice server listeners", () => {
         expect((await stat(target)).mode).toBe(targetMode);
         expect(await readFile(target, "utf8")).toBe("keep");
         await expect(stat(first)).rejects.toMatchObject({ code: "ENOENT" });
-        await expect(decrypt(`unix://${first}`, 100)).rejects.toMatchObject({
-          code: status.UNAVAILABLE,
-        });
+        await expectUnreachable(`unix://${first}`);
       } finally {
         bind.mockRestore();
       }
@@ -921,9 +937,7 @@ describe("keyservice server listeners", () => {
           await server.close();
         }
         await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
-        await expect(decrypt(uri, 100)).rejects.toMatchObject({
-          code: status.UNAVAILABLE,
-        });
+        await expectUnreachable(uri);
       });
     },
   );
@@ -1038,9 +1052,7 @@ describe("keyservice server listeners", () => {
         // Acquisition failure must roll back without relying on the caller's scope closing.
         await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
         expect(await readFile(blocked, "utf8")).toBe("keep");
-        await expect(decrypt(`unix://${path}`, 100)).rejects.toMatchObject({
-          code: status.UNAVAILABLE,
-        });
+        await expectUnreachable(`unix://${path}`);
       } finally {
         await Effect.runPromise(Scope.close(scope, Exit.void));
       }

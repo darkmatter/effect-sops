@@ -32,8 +32,8 @@ jobs:
           release=https://github.com/getsops/sops/releases/download/v3.13.3
           binary=sops-v3.13.3.linux.amd64
           checksums=sops-v3.13.3.checksums.txt
-          curl --fail --silent --show-error --location "$release/$binary" --output "$binary"
-          curl --fail --silent --show-error --location "$release/$checksums" --output "$checksums"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$release/$binary" --output "$binary"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$release/$checksums" --output "$checksums"
           awk -v binary="$binary" '$2 == binary' "$checksums" | sha256sum --check --strict
           install -Dm755 "$binary" "$RUNNER_TEMP/sops-bin/sops"
           echo "$RUNNER_TEMP/sops-bin" >> "$GITHUB_PATH"

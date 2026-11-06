@@ -37,6 +37,13 @@ export interface AgePluginClientOptions {
 
 const empty = new Uint8Array();
 const token = /^[\x21-\x7e]+$/;
+// Standard base64 pads with at most two "=" characters.
+const unpadded = (encoded: string): string =>
+  encoded.endsWith("==")
+    ? encoded.slice(0, -2)
+    : encoded.endsWith("=")
+      ? encoded.slice(0, -1)
+      : encoded;
 const protocolError = (plugin: string, message: string) =>
   new AgePluginError({ plugin, reason: "Protocol", message });
 const validName = (name: string): boolean =>
@@ -86,7 +93,7 @@ const decodeBody = (text: string, plugin: string): Uint8Array => {
   if (!/^[A-Za-z0-9+/]*$/.test(text))
     throw protocolError(plugin, "Invalid stanza base64");
   const bytes = Buffer.from(text, "base64");
-  if (bytes.toString("base64").replace(/=+$/, "") !== text) {
+  if (unpadded(bytes.toString("base64")) !== text) {
     bytes.fill(0);
     throw protocolError(plugin, "Non-canonical stanza base64");
   }
@@ -98,7 +105,7 @@ export const encodeStanza = (stanza: AgeStanza): string => {
   const header = [stanza.type, ...stanza.args];
   if (!header.every((value) => token.test(value)))
     throw protocolError("", "Invalid stanza header");
-  const body = Buffer.from(stanza.body).toString("base64").replace(/=+$/, "");
+  const body = unpadded(Buffer.from(stanza.body).toString("base64"));
   const lines: string[] = [];
   for (let offset = 0; offset < body.length; offset += 64)
     lines.push(body.slice(offset, offset + 64));
@@ -207,13 +214,13 @@ const exchange = Effect.fn("AgePlugin.exchange")(function* (
       const encoded = bytes.toString("base64");
       const hexadecimal = bytes.toString("hex");
       bytes.fill(0);
-      return [text, encoded, encoded.replace(/=+$/, ""), hexadecimal];
+      return [text, encoded, unpadded(encoded), hexadecimal];
     });
     for (const bytes of keyBytes) {
       values.push(
         new TextDecoder().decode(bytes),
         Buffer.from(bytes).toString("base64"),
-        Buffer.from(bytes).toString("base64").replace(/=+$/, ""),
+        unpadded(Buffer.from(bytes).toString("base64")),
         Buffer.from(bytes).toString("hex"),
       );
     }
