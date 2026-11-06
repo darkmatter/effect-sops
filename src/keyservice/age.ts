@@ -64,19 +64,12 @@ const discovers = (options: AgeKeyServiceOptions): boolean =>
   options.discover ??
   (options.identities === undefined && options.identityFiles === undefined);
 
-/**
- * Whether identities can come from `SOPS_AGE_KEY_CMD`. Such a command may
- * prompt (e.g. a password manager), so it only runs after approval.
- */
-const usesKeyCommand = (options: AgeKeyServiceOptions): boolean =>
-  discovers(options) && Boolean((options.env ?? process.env).SOPS_AGE_KEY_CMD);
-
 /** Load identities on demand using SOPS discovery; commands receive SOPS_AGE_RECIPIENT. */
 export const loadAgeIdentities = (
   options: AgeKeyServiceOptions,
   recipient?: string,
 ): Effect.Effect<AgeIdentities, KeyServiceError, ChildProcessSpawner> =>
-  collectIdentities(options, recipient, true).pipe(
+  collectIdentities(options, recipient).pipe(
     Effect.flatMap(({ identities, sources }) =>
       identities.native.length === 0 && identities.plugins.size === 0
         ? Effect.fail(
@@ -90,11 +83,7 @@ export const loadAgeIdentities = (
   );
 
 const collectIdentities = Effect.fn("Age.collectIdentities")(
-  function* (
-    options: AgeKeyServiceOptions,
-    recipient: string | undefined,
-    runKeyCommand: boolean,
-  ) {
+  function* (options: AgeKeyServiceOptions, recipient: string | undefined) {
     const env = { ...(options.env ?? process.env) };
     const native: Redacted.Redacted<string>[] = [];
     const plugins = new Map<string, Redacted.Redacted<string>[]>();
@@ -180,7 +169,7 @@ const collectIdentities = Effect.fn("Age.collectIdentities")(
       sources.push("SOPS_AGE_KEY_FILE");
       if (env.SOPS_AGE_KEY_FILE) yield* file(env.SOPS_AGE_KEY_FILE);
       sources.push("SOPS_AGE_KEY_CMD");
-      if (env.SOPS_AGE_KEY_CMD && runKeyCommand) {
+      if (env.SOPS_AGE_KEY_CMD) {
         const output = yield* keyCommand(
           env.SOPS_AGE_KEY_CMD,
           env,
@@ -330,11 +319,24 @@ export const ageKeyHandler: (
   };
   const context = yield* Effect.context<ChildProcessSpawner>();
   const run = Effect.runPromiseWith(context);
-  const identitiesFor = (recipient: string, runKeyCommand: boolean) =>
-    collectIdentities(options, recipient, runKeyCommand).pipe(
-      Effect.map(({ identities }) => identities),
+  // The server passes decrypt/encrypt the same key object it preflighted, so
+  // they reuse the identities their preflight loaded and SOPS_AGE_KEY_CMD
+  // (which may prompt, e.g. a password manager) runs once per request.
+  // Preflight itself always reloads, so every request sees current files.
+  const loaded = new WeakMap<KeyServiceKey, AgeIdentities>();
+  const identitiesFor = Effect.fn("Age.identitiesFor")(function* (
+    key: KeyServiceKey,
+    recipient: string,
+    reuse: boolean,
+  ) {
+    const cached = reuse ? loaded.get(key) : undefined;
+    if (cached) return cached;
+    const { identities } = yield* collectIdentities(options, recipient).pipe(
       Effect.provide(context),
     );
+    loaded.set(key, identities);
+    return identities;
+  });
   const matches = (
     identities: AgeIdentities,
     info: { readonly recipient: string; readonly plugin: string | undefined },
@@ -346,18 +348,20 @@ export const ageKeyHandler: (
       reason: "NoMatchingIdentity",
       message: `no age identity on this keyservice matches recipient ${sanitizeForDisplay(recipient)}`,
     });
-  // Runs before approval, so it must stay free of side effects: it never runs
-  // SOPS_AGE_KEY_CMD and never spawns a plugin.
+  // Runs before approval and never touches key material or spawns a plugin.
+  // Like sops, it loads identities (including SOPS_AGE_KEY_CMD) so keys this
+  // service cannot serve are refused without prompting the user.
   const check = Effect.fn("Age.check")(function* (
     operation: KeyServiceOperation,
     key: KeyServiceKey,
+    reuse: boolean,
   ) {
     const info = yield* recipientInfo(operation, key);
     if (operation === "encrypt") {
       if (info.plugin === undefined) return info;
       const allowed =
         options.encryptPlugins ??
-        [...(yield* identitiesFor(info.recipient, false)).plugins.keys()];
+        [...(yield* identitiesFor(key, info.recipient, reuse)).plugins.keys()];
       if (!allowed.includes(info.plugin))
         return yield* Effect.fail(
           new KeyServiceError({
@@ -367,77 +371,87 @@ export const ageKeyHandler: (
         );
       return info;
     }
-    // A key command could still supply the identity; it runs after approval.
-    if (usesKeyCommand(options)) return info;
-    if (!matches(yield* identitiesFor(info.recipient, false), info))
+    if (!matches(yield* identitiesFor(key, info.recipient, reuse), info)) {
+      loaded.delete(key);
       return yield* Effect.fail(noMatch(info.recipient));
+    }
     return info;
   });
+  const forget = (key: KeyServiceKey) =>
+    Effect.sync(() => {
+      loaded.delete(key);
+    });
   return {
-    preflight: (operation, key) => check(operation, key).pipe(Effect.asVoid),
-    decrypt: Effect.fn("Age.decrypt")(function* ({
-      request,
-      ciphertext,
-      interaction,
-    }) {
-      const info = yield* check("decrypt", request.key);
-      const identities = yield* identitiesFor(info.recipient, true);
-      if (!matches(identities, info))
-        return yield* Effect.fail(noMatch(info.recipient));
-      const plugin = info.plugin;
-      return yield* Effect.tryPromise({
-        try: async (signal) => {
-          const decrypter = new Decrypter();
-          for (const identity of identities.native)
-            decrypter.addIdentity(Redacted.value(identity));
-          const groups = [...identities.plugins];
-          groups.sort(
-            ([left], [right]) =>
-              Number(right === plugin) - Number(left === plugin),
-          );
-          for (const [name, group] of groups)
-            decrypter.addIdentity({
-              unwrapFileKey: async (stanzas) =>
-                (await run(
-                  unwrapFileKey(
-                    name,
-                    group.map(Redacted.value),
-                    stanzas.map((stanza) => ({
-                      type: stanza.args[0] ?? "",
-                      args: stanza.args.slice(1),
-                      body: stanza.body,
-                    })),
-                    { interaction, request, binary: options.pluginBinary },
-                  ),
-                  { signal },
-                )) ?? null,
-            });
-          const binaryHeader = "age-encryption.org/v1\n";
-          const binary =
-            new TextDecoder().decode(
-              ciphertext.subarray(0, binaryHeader.length),
-            ) === binaryHeader
-              ? ciphertext
-              : armor.decode(
-                  new TextDecoder("utf-8", { fatal: true }).decode(ciphertext),
-                );
-          const plaintext = await decrypter.decrypt(binary);
-          // Crypto itself is not cancellable; erase a late result after its caller has gone.
-          if (signal.aborted) {
-            plaintext.fill(0);
-            signal.throwIfAborted();
-          }
-          return plaintext;
-        },
-        catch: ageError,
-      });
-    }),
+    preflight: (operation, key) =>
+      check(operation, key, false).pipe(Effect.asVoid),
+    decrypt: Effect.fn("Age.decrypt")(
+      function* ({ request, ciphertext, interaction }) {
+        const info = yield* check("decrypt", request.key, true);
+        const identities = yield* identitiesFor(
+          request.key,
+          info.recipient,
+          true,
+        );
+        const plugin = info.plugin;
+        return yield* Effect.tryPromise({
+          try: async (signal) => {
+            const decrypter = new Decrypter();
+            for (const identity of identities.native)
+              decrypter.addIdentity(Redacted.value(identity));
+            const groups = [...identities.plugins];
+            groups.sort(
+              ([left], [right]) =>
+                Number(right === plugin) - Number(left === plugin),
+            );
+            for (const [name, group] of groups)
+              decrypter.addIdentity({
+                unwrapFileKey: async (stanzas) =>
+                  (await run(
+                    unwrapFileKey(
+                      name,
+                      group.map(Redacted.value),
+                      stanzas.map((stanza) => ({
+                        type: stanza.args[0] ?? "",
+                        args: stanza.args.slice(1),
+                        body: stanza.body,
+                      })),
+                      { interaction, request, binary: options.pluginBinary },
+                    ),
+                    { signal },
+                  )) ?? null,
+              });
+            const binaryHeader = "age-encryption.org/v1\n";
+            const binary =
+              new TextDecoder().decode(
+                ciphertext.subarray(0, binaryHeader.length),
+              ) === binaryHeader
+                ? ciphertext
+                : armor.decode(
+                    new TextDecoder("utf-8", { fatal: true }).decode(ciphertext),
+                  );
+            const plaintext = await decrypter.decrypt(binary);
+            // Crypto itself is not cancellable; erase a late result after its caller has gone.
+            if (signal.aborted) {
+              plaintext.fill(0);
+              signal.throwIfAborted();
+            }
+            return plaintext;
+          },
+          catch: ageError,
+        });
+      },
+      (effect, { request }) => effect.pipe(Effect.ensuring(forget(request.key))),
+    ),
     encrypt: Effect.fn("Age.encrypt")(function* ({
       request,
       plaintext,
       interaction,
     }) {
-      const { recipient, plugin } = yield* check("encrypt", request.key);
+      const { recipient, plugin } = yield* check(
+        "encrypt",
+        request.key,
+        true,
+      ).pipe(Effect.ensuring(forget(request.key)));
       return yield* Effect.tryPromise({
         try: async (signal) => {
           const encrypter = new Encrypter();

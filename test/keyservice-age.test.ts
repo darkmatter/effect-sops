@@ -190,26 +190,23 @@ test("an explicit env without HOME never reads the process home's keys.txt", asy
   }
 });
 
-test("preflight never runs SOPS_AGE_KEY_CMD; decrypt runs it after approval", () =>
+test("SOPS_AGE_KEY_CMD runs once per request and lets preflight refuse unservable keys", () =>
   temporary(async (directory) => {
-    const marker = join(directory, "command-ran");
+    const runs = join(directory, "command-runs");
     const handler = await run(
       ageKeyHandler({
         env: {
-          SOPS_AGE_KEY_CMD: `touch ${quote(marker)} && echo ${quote(identity)}`,
+          SOPS_AGE_KEY_CMD: `echo run >> ${quote(runs)} && echo ${quote(identity)}`,
         },
       }),
     );
-    // The command could still supply a matching identity, so preflight passes
-    // without running it — even for a recipient nothing else knows.
+    const count = async () =>
+      (await Bun.file(runs).exists())
+        ? (await readFile(runs, "utf8")).split("\n").filter(Boolean).length
+        : 0;
+    // Preflight loads the command's identities; decrypt of the same request
+    // (same key object, as the server passes it) reuses them.
     await run(handler.preflight("decrypt", nativeKey));
-    await run(
-      handler.preflight("decrypt", {
-        type: "age",
-        recipient: `age1${"q".repeat(58)}`,
-      }),
-    );
-    expect(await Bun.file(marker).exists()).toBe(false);
     const dataKey = await run(
       handler.decrypt({
         request: nativeRequest,
@@ -218,7 +215,18 @@ test("preflight never runs SOPS_AGE_KEY_CMD; decrypt runs it after approval", ()
       }),
     );
     expect(dataKey).toHaveLength(32);
-    expect(await Bun.file(marker).exists()).toBe(true);
+    expect(await count()).toBe(1);
+    // A recipient the command cannot serve is refused before any approval.
+    const failure = await run(
+      Effect.flip(
+        handler.preflight("decrypt", {
+          type: "age",
+          recipient: `age1${"q".repeat(58)}`,
+        }),
+      ),
+    );
+    expect(failure.reason).toBe("NoMatchingIdentity");
+    expect(await count()).toBe(2);
   }));
 
 test("native encrypt never loads identities", () =>
