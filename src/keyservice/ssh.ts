@@ -18,6 +18,9 @@ import {
   type SshTunnel,
 } from "./model.js";
 
+// ControlMaster/ControlPath: a host configured for multiplexing would hand the
+// forward to an existing master, where it outlives this process and its
+// readiness messages never reach our stderr. Each tunnel owns its connection.
 const defaults = [
   "-N",
   "-T",
@@ -29,6 +32,12 @@ const defaults = [
   "ServerAliveCountMax=3",
   "-o",
   "BatchMode=yes",
+  "-o",
+  "ConnectTimeout=10",
+  "-o",
+  "ControlMaster=no",
+  "-o",
+  "ControlPath=none",
 ];
 const tailLimit = 8192;
 const error = (

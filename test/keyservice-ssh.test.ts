@@ -29,6 +29,12 @@ const defaults = [
   "ServerAliveCountMax=3",
   "-o",
   "BatchMode=yes",
+  "-o",
+  "ConnectTimeout=10",
+  "-o",
+  "ControlMaster=no",
+  "-o",
+  "ControlPath=none",
 ];
 const options = {
   destination: "test-host",
