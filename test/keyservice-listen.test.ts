@@ -227,13 +227,13 @@ test("a Tailscale IPv6 address qualifies only its own interface's IPv4 address",
         addressInfo("100.63.255.255"),
         addressInfo("100.128.0.0"),
       ],
-      utun7: [addressInfo("100.104.7.108"), addressInfo("fd7a:115c:a1e0::1")],
+      utun7: [addressInfo("100.64.0.10"), addressInfo("fd7a:115c:a1e0::1")],
     }),
   };
-  expect(await run(Listen.tailscaleAddress(options))).toBe("100.104.7.108");
+  expect(await run(Listen.tailscaleAddress(options))).toBe("100.64.0.10");
   const resolved = await run(Listen.resolve(Listen.tailscale(42), options));
-  expect<ListenAddress>(resolved).toEqual(Listen.tcp("100.104.7.108", 42));
-  expect(keyServiceUri(resolved)).toBe("tcp://100.104.7.108:42");
+  expect<ListenAddress>(resolved).toEqual(Listen.tcp("100.64.0.10", 42));
+  expect(keyServiceUri(resolved)).toBe("tcp://100.64.0.10:42");
 });
 
 test.each(["100.64.0.0", "100.127.255.255"])(
@@ -270,7 +270,7 @@ test.each([
 ] as const)("%s requires CLI confirmation for IPv4", async (_name, interfaces) => {
   const options = { tailscaleBinary: fake, networkInterfaces: () => interfaces };
   await withMode("ok", async () => {
-    expect(await run(Listen.tailscaleAddress(options))).toBe("100.104.7.108");
+    expect(await run(Listen.tailscaleAddress(options))).toBe("100.64.0.10");
   });
   await withMode("fail", async () => {
     const error = await run(Listen.tailscaleAddress(options).pipe(Effect.flip));
@@ -287,7 +287,7 @@ test("IPv6 discovery selects only the Tailscale /48 prefix", async () => {
       utun: [
         addressInfo("fd7a:115c:a1e1::1"),
         addressInfo("fd7a:115c:a1e0::2", true),
-        addressInfo("100.104.7.108"),
+        addressInfo("100.64.0.10"),
         addressInfo("FD7A:115C:A1E0::ABCD"),
       ],
     }),
@@ -316,7 +316,7 @@ test.each([0, 2])(
           ],
         }),
       };
-      expect(await run(Listen.tailscaleAddress(options))).toBe("100.104.7.108");
+      expect(await run(Listen.tailscaleAddress(options))).toBe("100.64.0.10");
     });
   },
 );
@@ -345,7 +345,7 @@ test("interface discovery failure falls back to the CLI", () =>
           },
         }),
       ),
-    ).toBe("100.104.7.108");
+    ).toBe("100.64.0.10");
   }));
 
 test.each([

@@ -11,5 +11,5 @@ if (mode === "invalid") {
 } else if (mode === "wrong-family") {
   console.log(process.argv[3] === "-4" ? "::1" : "127.0.0.1");
 } else {
-  console.log(process.argv[3] === "-4" ? "\n100.104.7.108\n100.104.7.109" : "\nfd7a:115c:a1e0::1234\nfd7a:115c:a1e0::5678");
+  console.log(process.argv[3] === "-4" ? "\n100.64.0.10\n100.64.0.11" : "\nfd7a:115c:a1e0::1234\nfd7a:115c:a1e0::5678");
 }
