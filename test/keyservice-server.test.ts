@@ -2,11 +2,11 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { Client, credentials, Server, status, type MethodDefinition } from "@grpc/grpc-js";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { armor, Decrypter } from "age-encryption";
-import { lstatSync, symlinkSync, unlinkSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstatSync, symlinkSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Logger from "effect/Logger";
@@ -688,32 +688,22 @@ describe("keyservice server requests", () => {
 });
 
 describe("keyservice server listeners", () => {
-  test("concurrent Unix binds are owner-only at the callback and restore the umask", async () => {
+  test("concurrent Unix binds use private staging without calling umask", async () => {
     await temporary(async (directory) => {
       const originalBind = Server.prototype.bindAsync;
-      const observed: Array<{ mode: number; mask: number }> = [];
-      let binding = 0,
-        peakBinding = 0;
+      const stagingModes: number[] = [];
       const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(function (
         this: Server,
         address,
         credentials,
         callback,
       ) {
-        binding++;
-        peakBinding = Math.max(peakBinding, binding);
+        stagingModes.push(lstatSync(dirname(address.slice(5))).mode & 0o777);
         originalBind.call(this, address, credentials, (error, port) => {
-          observed.push({
-            mode: lstatSync(address.slice(5)).mode & 0o777,
-            mask: process.umask(),
-          });
-          setTimeout(() => {
-            binding--;
-            callback(error, port);
-          }, 30);
+          setTimeout(() => callback(error, port), 30);
         });
       });
-      const previous = process.umask(0);
+      const umask = spyOn(process, "umask");
       const results = await Promise.allSettled(
         ["first", "second"].map((name) =>
           start({
@@ -721,27 +711,31 @@ describe("keyservice server listeners", () => {
               _tag: "Unix",
               path: join(directory, `${name}.sock`),
             }),
-            socketMode: 0o660,
           }),
         ),
       );
       try {
         expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
-        expect(observed).toEqual([
-          { mode: 0o600, mask: 0o177 },
-          { mode: 0o600, mask: 0o177 },
-        ]);
-        expect(peakBinding).toBe(1);
-        expect(process.umask()).toBe(0);
+        expect(umask).not.toHaveBeenCalled();
+        expect(stagingModes).toEqual([0o700, 0o700]);
+        expect((await readdir(directory)).sort()).toEqual(["first.sock", "second.sock"]);
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          const bound = result.value.addresses[0]!;
+          if (bound.address._tag !== "Unix") throw new Error("Expected Unix listener");
+          expect((await stat(bound.address.path)).mode & 0o777).toBe(0o600);
+          expect((await decrypt(bound.uri)).plaintext.length).toBe(32);
+        }
       } finally {
         bind.mockRestore();
-        process.umask(previous);
+        umask.mockRestore();
         for (const result of results) if (result.status === "fulfilled") await result.value.close();
       }
+      expect(await readdir(directory)).toEqual([]);
     });
   });
 
-  test("rejects a replaced Unix socket without chmodding its symlink target", async () => {
+  test("rejects a final-path collision without chmodding its symlink target", async () => {
     await temporary(async (directory) => {
       const first = join(directory, "first.sock"),
         replaced = join(directory, "replaced.sock"),
@@ -749,17 +743,16 @@ describe("keyservice server listeners", () => {
       await writeFile(target, "keep", { mode: 0o644 });
       const targetMode = (await stat(target)).mode;
       const originalBind = Server.prototype.bindAsync;
+      let binds = 0;
       const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(function (
         this: Server,
         address,
         credentials,
         callback,
       ) {
+        binds++;
         originalBind.call(this, address, credentials, (error, port) => {
-          if (!error && address === `unix://${replaced}`) {
-            unlinkSync(replaced);
-            symlinkSync(target, replaced);
-          }
+          if (!error && binds === 2) symlinkSync(target, replaced);
           callback(error, port);
         });
       });
@@ -773,7 +766,9 @@ describe("keyservice server listeners", () => {
               addresses: addresses({ _tag: "Unix", path: first }, { _tag: "Unix", path: replaced }),
             },
           ),
-        ).rejects.toMatchObject({ reason: "BindFailed" });
+        ).rejects.toMatchObject({ reason: "BindFailed", cause: { code: "EEXIST" } });
+        expect((await readdir(directory)).sort()).toEqual(["replaced.sock", "target"]);
+        expect(lstatSync(replaced).isSymbolicLink()).toBe(true);
         expect((await stat(target)).mode).toBe(targetMode);
         expect(await readFile(target, "utf8")).toBe("keep");
         await expect(stat(first)).rejects.toMatchObject({ code: "ENOENT" });
@@ -787,19 +782,19 @@ describe("keyservice server listeners", () => {
   });
 
   test.each(["throw", "callback"])(
-    "restores the Unix bind umask on %s failure",
+    "removes private staging after a %s bind failure",
     async (failure) => {
       await temporary(async (directory) => {
-        let bindingMask = -1;
+        let stagingMode = -1;
+        const error = new Error("Fixture bind failure");
         const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(
-          (_address, _credentials, callback) => {
-            bindingMask = process.umask();
-            const error = new Error("Fixture bind failure");
+          (address, _credentials, callback) => {
+            stagingMode = lstatSync(dirname(address.slice(5))).mode & 0o777;
             if (failure === "throw") throw error;
             callback(error, 0);
           },
         );
-        const previous = process.umask(0o022);
+        const umask = spyOn(process, "umask");
         try {
           await expect(
             start({
@@ -808,16 +803,86 @@ describe("keyservice server listeners", () => {
                 path: join(directory, "failed.sock"),
               }),
             }),
-          ).rejects.toMatchObject({ reason: "BindFailed" });
-          expect(bindingMask).toBe(0o177);
-          expect(process.umask()).toBe(0o022);
+          ).rejects.toMatchObject({ reason: "BindFailed", cause: error });
+          expect(stagingMode).toBe(0o700);
+          expect(umask).not.toHaveBeenCalled();
+          expect(await readdir(directory)).toEqual([]);
         } finally {
           bind.mockRestore();
-          process.umask(previous);
+          umask.mockRestore();
         }
       });
     },
   );
+
+  test.each(["missing getuid", "worker umask restriction"])(
+    "serves Unix requests with %s",
+    async (environment) => {
+      await temporary(async (directory) => {
+        const descriptor = Object.getOwnPropertyDescriptor(process, "getuid");
+        const umask = spyOn(process, "umask").mockImplementation(() => {
+          throw new Error("Setting process.umask() is not supported in workers");
+        });
+        try {
+          if (environment === "missing getuid") {
+            Object.defineProperty(process, "getuid", { configurable: true, value: undefined });
+          }
+          await withServer(
+            async (uri) => {
+              expect((await decrypt(uri)).plaintext.length).toBe(32);
+            },
+            { addresses: addresses({ _tag: "Unix", path: join(directory, "service.sock") }) },
+          );
+          expect(umask).not.toHaveBeenCalled();
+          expect(await readdir(directory)).toEqual([]);
+        } finally {
+          if (descriptor) Object.defineProperty(process, "getuid", descriptor);
+          else Reflect.deleteProperty(process, "getuid");
+          umask.mockRestore();
+        }
+      });
+    },
+  );
+
+  test("removes staging when socket permission setup fails", async () => {
+    await temporary(async (directory) => {
+      await expect(
+        start({
+          addresses: addresses({ _tag: "Unix", path: join(directory, "service.sock") }),
+          socketMode: -1,
+        }),
+      ).rejects.toMatchObject({ reason: "BindFailed" });
+      expect(await readdir(directory)).toEqual([]);
+    });
+  });
+
+  test("reports the staging path byte length and removes staging when it is too long", async () => {
+    await temporary(async (directory) => {
+      const parent = join(directory, "a".repeat(90));
+      await mkdir(parent);
+      await expect(
+        start({ addresses: addresses({ _tag: "Unix", path: join(parent, "service.sock") }) }),
+      ).rejects.toMatchObject({
+        reason: "BindFailed",
+        message: expect.stringMatching(/staging path length \d+ bytes exceeds/),
+      });
+      expect(await readdir(parent)).toEqual([]);
+    });
+  });
+
+  test("rejects a final socket path that is too long even when staging fits", async () => {
+    await temporary(async (directory) => {
+      await expect(
+        withServer(async () => {}, {
+          addresses: addresses({ _tag: "Unix", path: join(directory, "a".repeat(120)) }),
+        }),
+      ).rejects.toMatchObject({
+        reason: "BindFailed",
+        message: expect.stringMatching(/final path length \d+ bytes exceeds/),
+      });
+      expect(await readdir(directory)).toEqual([]);
+    });
+  });
 
   test("binds every TCP address and reports real ephemeral ports", async () => {
     const server = await start({
@@ -890,10 +955,18 @@ describe("keyservice server listeners", () => {
       await new Promise<void>((resolve, reject) =>
         listener.once("error", reject).listen(path, resolve),
       );
+      const original = lstatSync(path);
       try {
         await expect(start({ addresses: addresses({ _tag: "Unix", path }) })).rejects.toMatchObject(
           { reason: "BindFailed" },
         );
+        const unchanged = lstatSync(path);
+        expect([unchanged.ino, unchanged.dev, unchanged.mode]).toEqual([
+          original.ino,
+          original.dev,
+          original.mode,
+        ]);
+        expect(await readdir(directory)).toEqual(["occupied"]);
         await Effect.runPromise(
           Effect.promise(() => probeClosed.promise).pipe(Effect.timeout("500 millis")),
         );

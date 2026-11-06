@@ -18,7 +18,13 @@ if (mode === "noisy-fail") {
 } else if (mode === "fail") {
   process.stderr.write("Permission denied (publickey).\n");
   process.exitCode = 255;
-} else if (mode === "timeout" || mode === "ignore-term") {
+} else if (
+  mode === "timeout" ||
+  mode === "ignore-term" ||
+  mode === "jump-only"
+) {
+  if (mode === "jump-only")
+    process.stderr.write("debug1: Entering interactive session.\n");
   if (mode === "ignore-term")
     process.on("SIGTERM", () => {
       /* Exercise forced scoped termination. */
@@ -77,6 +83,10 @@ if (mode === "noisy-fail") {
   if (mode === "busy" && !connectionsFile) {
     busy();
   }
+  if (mode === "jump") {
+    process.stderr.write("debug1: Entering interactive session.\n");
+    await Bun.sleep(300);
+  }
   server.listen(requestedPort, host, async () => {
     const port = server.address().port;
     if (mode === "busy") {
@@ -85,8 +95,15 @@ if (mode === "noisy-fail") {
       return;
     }
     if (!remote && args.includes("-v")) {
+      const diagnosticHost =
+        mode === "wrong-host"
+          ? "192.0.2.1"
+          : mode === "bracketed"
+            ? `[${host}]`
+            : host;
+      const diagnosticPort = mode === "wrong-port" ? 0 : port;
       process.stderr.write(
-        `debug1: Local forwarding listening on ${host} port ${port}.\n`,
+        `debug1: Local forwarding listening on ${diagnosticHost} port ${diagnosticPort}.\n`,
       );
       if (mode === "listening-only") return;
       const success = "debug1: Entering interactive session.\n";

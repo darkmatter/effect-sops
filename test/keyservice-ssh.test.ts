@@ -85,11 +85,11 @@ async function echo(path?: string) {
   };
 }
 
-const roundtrip = (port: number) =>
+const roundtrip = (port: number, host = "127.0.0.1") =>
   Effect.tryPromise(
     () =>
       new Promise<string>((resolve, reject) => {
-        const socket = net.createConnection({ host: "127.0.0.1", port });
+        const socket = net.createConnection({ host, port });
         socket.once("connect", () => socket.write("keyservice forwarding"));
         socket.once("data", (value) => {
           socket.destroy();
@@ -261,6 +261,68 @@ describe("SSH forwards", () => {
       expect(failure.reason).toBe("TimedOut");
       expect(failure.stderr).toContain("Local forwarding listening on");
     });
+  });
+  test("a jump session becomes ready only when the final forward accepts connections", async () => {
+    const server = await echo();
+    try {
+      await mode("jump", () =>
+        run(
+          Effect.gen(function* () {
+            const tunnel = yield* localForward({
+              ...options,
+              remotePort: server.port,
+            });
+            expect(yield* roundtrip(tunnel.bindPort)).toBe(
+              "keyservice forwarding",
+            );
+          }),
+        ),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+  test("a jump session without the final listener times out", async () => {
+    await mode("jump-only", async () => {
+      const failure = await run(
+        Effect.flip(localForward({ ...options, readyTimeout: "250 millis" })),
+      );
+      expect(failure.reason).toBe("TimedOut");
+      expect(failure.stderr).toContain("Entering interactive session");
+    });
+  });
+  test("listening diagnostics for another host or port do not establish readiness", async () => {
+    for (const value of ["wrong-host", "wrong-port"])
+      await mode(value, async () => {
+        const failure = await run(
+          Effect.flip(localForward({ ...options, readyTimeout: "250 millis" })),
+        );
+        expect(failure.reason).toBe("TimedOut");
+        expect(failure.stderr).toContain("Local forwarding listening on");
+        expect(failure.stderr).toContain("Entering interactive session");
+      });
+  });
+  test("IPv6 listening diagnostics accept either bracket style", async () => {
+    const server = await echo();
+    try {
+      for (const value of ["normal", "bracketed"])
+        await mode(value, () =>
+          run(
+            Effect.gen(function* () {
+              const tunnel = yield* localForward({
+                ...options,
+                localHost: "::1",
+                remotePort: server.port,
+              });
+              expect(yield* roundtrip(tunnel.bindPort, tunnel.bindHost)).toBe(
+                "keyservice forwarding",
+              );
+            }),
+          ),
+        );
+    } finally {
+      await server.close();
+    }
   });
   test("local readiness diagnostics may span chunks", async () => {
     await mode("split", () =>

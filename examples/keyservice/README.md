@@ -88,8 +88,9 @@ When embedding it, `decryptThroughTunnel(destination, path)` returns
 Effect when a service URI is already available.
 
 For a scoped Effect client, use `Ssh.localForward` from
-`effect-sops/KeyService`. Promise tunnel handles expose `exited: Promise<void>`;
-server handles expose the same signal on each `service.tunnels[i]`. A dropped
+`effect-sops/KeyService`. In the Promise API, `openKeyServiceTunnel` handles
+and each `startKeyService` handle's `tunnels[i]` expose `exited:
+Promise<void>`; in the Effect API, each tunnel has `awaitExit`. A dropped
 remote forward logs its destination. Standalone servers keep their local
 listeners running and do not reconnect automatically.
 

@@ -301,7 +301,9 @@ export interface KeyServiceServerOptions {
   /**
    * Requests allowed to wait for their turn. Further requests are refused
    * with `RESOURCE_EXHAUSTED` so a flood cannot queue unbounded prompts.
-   * Default: 16.
+   * A queued request waits until served or its client cancels. Worst-case
+   * completion time is about `(maxPendingRequests + 1) × requestTimeout`,
+   * plus interruption cleanup. Default: 16.
    */
   readonly maxPendingRequests?: number;
   /** Log request metadata (never key material). Default: `true`. */

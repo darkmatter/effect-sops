@@ -218,6 +218,7 @@ const spawnForward = Effect.fn("Ssh.spawnForward")(function* (
   let pending = "";
   let allocated: number | undefined = port === 0 ? undefined : port;
   let succeeded = false;
+  let localListening = false;
   const line = (value: string) =>
     Effect.gen(function* () {
       if (direction === "local") {
@@ -230,10 +231,23 @@ const spawnForward = Effect.fn("Ssh.spawnForward")(function* (
             ready,
             error(options, "ForwardFailed", "SSH local forwarding failed", tail),
           );
-        // OpenSSH prints its listening message before bind succeeds; session
-        // entry follows successful forwarding setup.
-        else if (value.includes("Entering interactive session"))
-          yield* Deferred.succeed(ready, port);
+        else {
+          const match = /Local forwarding listening on (\S+) port (\d+)\./.exec(
+            value,
+          );
+          // Jump hops share stderr. Require our listener before session entry;
+          // the listening message itself precedes bind and may still fail.
+          if (
+            match &&
+            match[1]?.replace(/^\[|\]$/g, "") === host &&
+            Number(match[2]) === port
+          )
+            localListening = true;
+          else if (
+            localListening && value.includes("Entering interactive session")
+          )
+            yield* Deferred.succeed(ready, port);
+        }
         return;
       }
       if (

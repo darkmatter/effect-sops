@@ -1,7 +1,7 @@
 import { lstatSync } from "node:fs";
-import { chmod, lstat, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, rm, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
   Server,
   ServerCredentials,
@@ -35,9 +35,6 @@ import {
   type EncryptRequestMessage,
   type EncryptResponseMessage,
 } from "./protocol.js";
-
-// umask is process-wide: all server instances must serialize Unix socket creation.
-const unixBindSemaphore = Semaphore.makeUnsafe(1);
 
 const grpcStatus: Record<KeyServiceErrorReason, status> = {
   MissingKey: status.NOT_FOUND,
@@ -358,70 +355,78 @@ export const makeServer: (
       // so even a late port-0 bind is registered before the scope shuts it down.
       const address = yield* Effect.uninterruptible(
         Effect.gen(function* () {
-          const bind = Effect.callback<number, KeyServiceListenError>((resume) => {
-            // Restrict access from socket creation until the bind callback, before chmod can run.
-            const previousUmask = resolved._tag === "Unix" ? process.umask(0o177) : undefined;
-            let restored = false;
-            const restoreUmask = () => {
-              if (previousUmask !== undefined && !restored) {
-                process.umask(previousUmask);
-                restored = true;
+          const bind = (bindTarget: string) =>
+            Effect.callback<number, KeyServiceListenError>((resume) => {
+              try {
+                server.bindAsync(bindTarget, ServerCredentials.createInsecure(), (error, port) =>
+                  resume(error ? Effect.fail(bindError(target)(error)) : Effect.succeed(port)),
+                );
+              } catch (cause) {
+                resume(Effect.fail(bindError(target)(cause)));
               }
-            };
-            try {
-              server.bindAsync(target, ServerCredentials.createInsecure(), (error, port) => {
-                let result: Effect.Effect<number, KeyServiceListenError>;
-                try {
-                  if (error) throw error;
-                  if (resolved._tag === "Unix") {
-                    // Capture the inode before yielding back to other asynchronous work.
-                    const info = lstatSync(resolved.path);
-                    if (!info.isSocket() || info.uid !== process.getuid?.()) {
+            });
+          if (resolved._tag === "Tcp") return { ...resolved, port: yield* bind(target) };
+          yield* Effect.acquireUseRelease(
+            Effect.tryPromise({
+              try: () => mkdtemp(join(dirname(resolved.path), ".ks-")),
+              catch: bindError(target),
+            }),
+            (staging) =>
+              Effect.gen(function* () {
+                const path = join(staging, "s");
+                const limit = process.platform === "linux" ? 108 : 104;
+                for (const [kind, candidate] of Object.entries({ staging: path, final: resolved.path })) {
+                  const length = Buffer.byteLength(candidate);
+                  if (length >= limit) {
+                    const message = `Unix socket ${kind} path length ${length} bytes exceeds the ${limit - 1}-byte limit`;
+                    return yield* Effect.fail(
+                      new KeyServiceListenError({
+                        reason: "BindFailed",
+                        address: target,
+                        message,
+                        cause: new Error(message),
+                      }),
+                    );
+                  }
+                }
+                yield* Effect.tryPromise({
+                  // mkdtemp is private; restore owner access even under a restrictive umask.
+                  try: () => chmod(staging, 0o700),
+                  catch: bindError(target),
+                });
+                yield* bind(grpcBindTarget({ _tag: "Unix", path }));
+                yield* Effect.tryPromise({
+                  try: async () => {
+                    const staged = await lstat(path);
+                    if (
+                      !staged.isSocket() ||
+                      (typeof process.getuid === "function" && staged.uid !== process.getuid())
+                    ) {
                       throw new Error("Bound socket path has an unexpected type or owner");
                     }
-                    sockets.set(resolved.path, {
-                      ino: info.ino,
-                      dev: info.dev,
-                    });
-                  }
-                  result = Effect.succeed(port);
-                } catch (cause) {
-                  result = Effect.fail(bindError(target)(cause));
-                } finally {
-                  restoreUmask();
-                }
-                resume(result);
-              });
-            } catch (cause) {
-              restoreUmask();
-              resume(Effect.fail(bindError(target)(cause)));
-            }
-          });
-          const port = yield* resolved._tag === "Unix"
-            ? bind.pipe(Semaphore.withPermit(unixBindSemaphore))
-            : bind;
-          if (resolved._tag === "Tcp") return { ...resolved, port };
-          yield* Effect.tryPromise({
-            try: async () => {
-              const identity = sockets.get(resolved.path);
-              const checkSocket = async () => {
-                const info = await lstat(resolved.path);
-                if (
-                  !info.isSocket() ||
-                  info.uid !== process.getuid?.() ||
-                  info.ino !== identity?.ino ||
-                  info.dev !== identity.dev
-                ) {
-                  throw new Error("Bound socket path changed during permission setup");
-                }
-              };
-              // Refuse a replacement before chmod and detect changes during permission setup.
-              await checkSocket();
-              await chmod(resolved.path, options.socketMode ?? 0o600);
-              await checkSocket();
-            },
-            catch: bindError(target),
-          });
+                    await chmod(path, options.socketMode ?? 0o600);
+                    // A hard link publishes the protected socket without replacing a racing file.
+                    await link(path, resolved.path);
+                    sockets.set(resolved.path, { ino: staged.ino, dev: staged.dev });
+                    const info = lstatSync(resolved.path);
+                    if (
+                      !info.isSocket() ||
+                      (typeof process.getuid === "function" && info.uid !== process.getuid()) ||
+                      info.ino !== staged.ino ||
+                      info.dev !== staged.dev
+                    ) {
+                      throw new Error("Bound socket path changed during publication");
+                    }
+                  },
+                  catch: bindError(target),
+                });
+              }),
+            (staging) =>
+              Effect.tryPromise({
+                try: () => rm(staging, { recursive: true, force: true }),
+                catch: bindError(target),
+              }),
+          );
           return resolved;
         }),
       );

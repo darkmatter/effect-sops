@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Unix keyservice sockets bind in a private staging directory without changing
+  the process umask, then publish atomically without replacing occupied paths.
+- Cached `SopsFile` resources decrypt once more after upgrading because
+  keyservice URIs no longer count as content in their cache hash. This can
+  trigger one additional approval per cached resource.
 - Keyservice decryption uses only the approved recipient's native identity or
   matching plugin group. `SOPS_AGE_KEY_CMD` runs only after approval, so a
   command-only identity cannot be refused as missing before the prompt.
