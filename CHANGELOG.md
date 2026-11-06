@@ -4,6 +4,29 @@
 
 ### Fixed
 
+- Unix keyservice sockets bind in a private staging directory without changing
+  the process umask, then publish atomically without replacing occupied paths.
+- Cached `SopsFile` resources decrypt once more after upgrading because
+  keyservice URIs no longer count as content in their cache hash. This can
+  trigger one additional approval per cached resource.
+- Keyservice decryption uses only the approved recipient's native identity or
+  matching plugin group. `SOPS_AGE_KEY_CMD` runs only after approval, so a
+  command-only identity cannot be refused as missing before the prompt.
+- Keyservice requests default to five minutes from the start of their turn,
+  excluding queue time, with at most `maxPendingRequests` waiting (default: 16).
+- Keyservices warn about automatic approval on non-loopback listeners and SSH
+  remote forwards, and log dropped remote-forward destinations. Promise
+  handles expose `tunnels[i].exited` to observe forward termination.
+- `startKeyService` rejects `listen` combined with `network`, `address`, or
+  `tailscale`. Use `Ssh.localForward` for the scoped Effect SSH client; the
+  `connect` alias and public address helper re-exports were removed.
+- Documented keyservice limits: SSH age keys are unsupported unlike upstream
+  SOPS; TCP addresses require a host instead of `:5000`; all `ssh -R` peers
+  appear as `127.0.0.1`, so remembered approvals cover every reachable user of
+  the remote host. SSH transport forwards remain supported.
+- Documented Alchemy lifecycle behavior: a dead remote forward closes the
+  whole keyservice instance; the next plan or deploy restarts it, with no
+  automatic restart between plans.
 - Native keyservice timeouts now interrupt stalled local identity discovery and
   document decryption. Effect scopes release gRPC clients and erase recovered
   data keys on completion, failure, timeout, and interruption.
@@ -16,6 +39,12 @@
   secret keys echoed by a backend are redacted.
 
 ### Added
+
+- Native SOPS keyservice server with scoped Effect and closeable Promise APIs,
+  TCP and Unix listeners, terminal or macOS approval, remembered approvals,
+  age plugin PIN and touch support, Tailscale addresses, and SSH forwards.
+- Alchemy `SopsKeyService` and `SopsKeyServiceTunnel` resources, runnable
+  keyservice examples, and a manual YubiKey check.
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node
 - Document MAC verification on the keyservice path, bounded RPC deadlines,
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node and Bun, using the existing @drkmttr/sops-age data-key API. Schema, Config, resources, and Actions support SOPS_KEYSERVICE, SOPS_ENABLE_LOCAL_KEYSERVICE, and explicit per-call options

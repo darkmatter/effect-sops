@@ -1,0 +1,174 @@
+#!/usr/bin/env bun
+import { tmpdir } from "node:os";
+import { realpathSync } from "node:fs";
+import { expectReply, exchange, read, waitForEof, write } from "./protocol.ts";
+
+const mode = process.env.FAKE_PLUGIN_MODE ?? "plain";
+const protocol = process.argv[2];
+if (realpathSync(process.cwd()) !== realpathSync(tmpdir()))
+  throw new Error("Expected temporary cwd");
+const commands = [];
+for (;;) {
+  const command = await read();
+  if (command.type === "done") break;
+  commands.push(command);
+}
+if (mode === "crash") {
+  process.stderr.write("fake process exited deliberately\n");
+  process.exit(3);
+}
+if (mode === "error-control") {
+  expectReply(
+    await exchange("error", ["internal"], "bad\u001b[2J\u202edetail"),
+    "ok",
+  );
+  write("done");
+  process.exit(0);
+}
+
+if (protocol === "--age-plugin=recipient-v1") {
+  if (
+    commands.map((command) => command.type).join(",") !==
+    "add-recipient,wrap-file-key,extension-labels"
+  )
+    throw new Error("Unexpected recipient phase one");
+  const key = commands[1].body;
+  if (key.length !== 16) throw new Error("Expected 16-byte file key");
+  if (mode === "empty-wrap") {
+    write("done");
+    process.exit(0);
+  }
+  expectReply(await exchange("labels", ["fixture"]), "ok");
+  if (mode === "duplicate-labels") {
+    write("labels", ["second"]);
+    await read();
+    process.exit(4);
+  }
+  expectReply(
+    await exchange(
+      "recipient-stanza",
+      [mode === "bad-index" ? "1" : "0", "fake-wrap", "aabbccdd"],
+      key.map((byte) => byte ^ 0x5a),
+    ),
+    "ok",
+  );
+} else if (protocol === "--age-plugin=identity-v1") {
+  if (!commands.some((command) => command.type === "add-identity"))
+    throw new Error("Missing identity");
+  if (
+    commands.some(
+      (command) => !["add-identity", "recipient-stanza"].includes(command.type),
+    )
+  )
+    throw new Error("Unexpected identity phase one");
+  const stanza = commands.find(
+    (command) =>
+      command.type === "recipient-stanza" &&
+      command.args[0] === "0" &&
+      command.args[1] === "fake-wrap",
+  );
+  if (!stanza) {
+    write("done");
+    process.exit(0);
+  }
+  if (mode === "diagnostic-secret") {
+    const reply = await exchange(
+      "request-secret",
+      [],
+      "Diagnostic fixture PIN",
+    );
+    expectReply(reply, "ok");
+    const identity = commands.find((command) => command.type === "add-identity")
+      ?.args[0];
+    if (!identity) throw new Error("Missing diagnostic identity");
+    const values = [Buffer.from(reply.body), Buffer.from(identity)];
+    const diagnostic = values
+      .flatMap((value) => [
+        value.toString(),
+        value.toString("base64"),
+        value.toString("base64").replace(/=+$/, ""),
+        value.toString("hex"),
+      ])
+      .join(" ");
+    process.stderr.write(`fixture diagnostic ${diagnostic}\n`);
+    expectReply(await exchange("error", ["internal"], diagnostic), "ok");
+    write("done");
+    process.exit(0);
+  }
+  if (mode === "pin" || mode === "cancel-done") {
+    const reply = await exchange("request-secret", [], "Enter PIN for fake");
+    if (
+      reply.type !== "ok" ||
+      Buffer.from(reply.body).toString() !== "123456"
+    ) {
+      if (mode !== "cancel-done")
+        expectReply(await exchange("error", ["internal"], "wrong PIN"), "ok");
+      write("done");
+      process.exit(0);
+    }
+  }
+  if (mode === "chatty") {
+    expectReply(await exchange("msg", [], "Touch fake token"), "ok");
+    expectReply(
+      await exchange(
+        "confirm",
+        ["WWVzLCBjb250aW51ZQ", "Tm8sIHN0b3A"],
+        "Continue?",
+      ),
+      "ok",
+      "yes",
+    );
+    const reply = await exchange("request-public", [], "Token label");
+    expectReply(reply, "ok");
+    if (Buffer.from(reply.body).toString() !== "fixture label")
+      throw new Error("Wrong public response body");
+  }
+  if (mode === "confirm-no")
+    expectReply(await exchange("confirm", ["WWVz"], "Continue?"), "ok", "no");
+  if (mode === "bad-confirm") {
+    write("confirm", ["WWVz", "Tm8", "VGhpcmQ"], "Continue?");
+    await read();
+    process.exit(4);
+  }
+  if (mode === "bad-label") {
+    write("confirm", ["WWVz="], "Continue?");
+    await read();
+    process.exit(4);
+  }
+  if (mode === "unsupported")
+    expectReply(await exchange("future-command", ["extra"]), "unsupported");
+  if (mode === "slow") await Bun.sleep(6_000);
+  if (mode === "waiting-gate") {
+    await Bun.sleep(200);
+    expectReply(await exchange("msg", [], "release waiting callback"), "ok");
+  }
+  if (
+    mode === "hold" ||
+    mode === "hold-ignore-term" ||
+    mode === "post-done-hold"
+  ) {
+    if (mode === "hold-ignore-term") process.on("SIGTERM", () => undefined);
+    expectReply(await exchange("msg", [], `pid:${process.pid}`), "ok");
+    if (mode !== "post-done-hold") await Bun.sleep(60_000);
+  }
+  const key = stanza.body.map((byte) => byte ^ 0x5a);
+  expectReply(
+    await exchange(
+      "file-key",
+      [mode === "bad-index" ? "1" : "0"],
+      mode === "short-key" ? key.slice(1) : key,
+    ),
+    "ok",
+  );
+  if (mode === "duplicate-key") {
+    write("file-key", ["0"], key);
+    await read();
+    process.exit(4);
+  }
+} else {
+  throw new Error("Unknown age protocol");
+}
+write("done");
+// Closing stdin is part of completing the client exchange, not just receiving done.
+await waitForEof();
+if (mode === "post-done-hold") await Bun.sleep(60_000);

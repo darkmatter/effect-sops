@@ -1,0 +1,15 @@
+#!/usr/bin/env bun
+// Exercise the real process boundary while making CLI failures deterministic.
+if (process.argv[2] !== "ip" || !["-4", "-6"].includes(process.argv[3] ?? "")) {
+  process.exit(2);
+}
+const mode = process.env.FAKE_TAILSCALE_MODE;
+if (mode === "fail") process.exit(1);
+if (mode === "empty") process.exit(0);
+if (mode === "invalid") {
+  console.log("not-an-ip");
+} else if (mode === "wrong-family") {
+  console.log(process.argv[3] === "-4" ? "::1" : "127.0.0.1");
+} else {
+  console.log(process.argv[3] === "-4" ? "\n100.64.0.10\n100.64.0.11" : "\nfd7a:115c:a1e0::1234\nfd7a:115c:a1e0::5678");
+}

@@ -8,6 +8,9 @@ import { SopsFileProvider } from "effect-sops";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as ConfigProvider from "effect/ConfigProvider";
+import { Interaction, Listen, startKeyService } from "effect-sops/KeyService";
 
 import { fixtureAgeKey } from "./_shared/fixture.ts";
 import { program as cloudflareSecrets } from "./cloudflare-secrets-store/app.ts";
@@ -16,6 +19,94 @@ import { program as githubSecrets } from "./github-actions-secrets/app.ts";
 import { program as jsonImport } from "./json-import/app.ts";
 import { readSecrets } from "./schema-decoder/app.ts";
 import { program as sopsFile } from "./sops-file/app.ts";
+import { decryptThroughKeyService, decryptThroughTunnel } from "./keyservice/client.ts";
+import {
+  chooseConfiguration,
+  namedConfigurations,
+  startConfiguredKeyService,
+} from "./keyservice/serve.ts";
+
+bunTest("Keyservice example decrypts the shared fixture through a random loopback port", async () => {
+  await Effect.runPromise(Effect.gen(function* () {
+    let approvals = 0;
+    const service = yield* startConfiguredKeyService("local", {
+      listen: Listen.loopback(0),
+      age: { identities: [fixtureAgeKey], discover: false, env: {} },
+      interaction: Interaction.make({ approve: () => { approvals++; return true; } }),
+    });
+    const plaintext = yield* decryptThroughKeyService(
+      service.uri,
+      new URL("./_shared/secrets.sops.json", import.meta.url).pathname,
+    );
+    const document: unknown = JSON.parse(plaintext);
+    expect(JSON.stringify(document) === JSON.stringify({
+      api: { token: "native-token", enabled: true }, nested: { count: 3 },
+    })).toBe(true);
+    expect(approvals).toBe(1);
+    expect(service.uri.startsWith("tcp://127.0.0.1:")).toBe(true);
+    expect(service.uri.endsWith(":0")).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(BunServices.layer)));
+});
+
+bunTest("Keyservice Promise example decrypts with an async-disposable handle", async () => {
+  await using service = await startKeyService({
+    address: "127.0.0.1:0",
+    age: { identities: [fixtureAgeKey], discover: false, env: {} },
+  });
+  const plaintext = await Effect.runPromise(decryptThroughKeyService(
+    service.uri,
+    new URL("./_shared/secrets.sops.json", import.meta.url).pathname,
+  ));
+  const document: unknown = JSON.parse(plaintext);
+  expect(JSON.stringify(document) === JSON.stringify({
+    api: { token: "native-token", enabled: true }, nested: { count: 3 },
+  })).toBe(true);
+});
+
+bunTest("Keyservice client keeps its SSH tunnel alive until decryption completes", async () => {
+  await using service = await startKeyService({
+    address: "127.0.0.1:0",
+    age: { identities: [fixtureAgeKey], discover: false, env: {} },
+    interaction: Interaction.make({ approve: () => Effect.sleep("50 millis").pipe(Effect.as(true)) }),
+  });
+  const plaintext = await decryptThroughTunnel(
+    "test-host",
+    new URL("./_shared/secrets.sops.json", import.meta.url).pathname,
+    {
+      ssh: new URL("../test/fixtures/ssh/ssh-fake", import.meta.url).pathname,
+      remotePort: Number(new URL(service.uri).port),
+      readyTimeout: "3 seconds",
+    },
+  );
+  const document: unknown = JSON.parse(plaintext);
+  expect(JSON.stringify(document) === JSON.stringify({
+    api: { token: "native-token", enabled: true }, nested: { count: 3 },
+  })).toBe(true);
+});
+
+for (const name of Object.keys(namedConfigurations)) {
+  bunTest(`Keyservice example selects named ${name} configuration without a terminal`, async () => {
+    const selected = await Effect.runPromise(chooseConfiguration({ interactive: false }).pipe(
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ KEYSERVICE_CONFIG: name }))),
+      Effect.provide(BunServices.layer),
+    ));
+    expect(selected === name).toBe(true);
+  });
+}
+
+for (const selection of [undefined, "unknown"]) {
+  bunTest(`Keyservice example rejects ${selection === undefined ? "missing" : "invalid"} headless configuration`, async () => {
+    const effect = chooseConfiguration({ interactive: false }).pipe(
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(
+        selection === undefined ? {} : { KEYSERVICE_CONFIG: selection },
+      ))),
+      Effect.provide(BunServices.layer),
+    );
+    await expect(Effect.runPromise(effect)).rejects.toThrow(
+      "Set KEYSERVICE_CONFIG to one of: local, tailscale, devbox",
+    );
+  });
+}
 
 const { test: sopsTest } = Test.make({ providers: SopsFileProvider() });
 

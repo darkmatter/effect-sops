@@ -1,0 +1,151 @@
+#!/usr/bin/env bun
+import * as net from "node:net";
+import { writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const mode = process.env.FAKE_SSH_MODE ?? "normal";
+const pidFile = args
+  .find((arg) => arg.startsWith("FakePidFile="))
+  ?.slice("FakePidFile=".length);
+const connectionsFile = args
+  .find((arg) => arg.startsWith("FakeConnectionsFile="))
+  ?.slice("FakeConnectionsFile=".length);
+if (pidFile) writeFileSync(pidFile, String(process.pid));
+if (mode === "noisy-fail") {
+  await Bun.write(Bun.stderr, "x".repeat(100000));
+  process.stderr.write("Permission denied (publickey).\n");
+  process.exitCode = 255;
+} else if (mode === "fail") {
+  process.stderr.write("Permission denied (publickey).\n");
+  process.exitCode = 255;
+} else if (
+  mode === "timeout" ||
+  mode === "ignore-term" ||
+  mode === "jump-only"
+) {
+  if (mode === "jump-only")
+    process.stderr.write("debug1: Entering interactive session.\n");
+  if (mode === "ignore-term")
+    process.on("SIGTERM", () => {
+      /* Exercise forced scoped termination. */
+    });
+  setInterval(() => {}, 1000);
+} else {
+  const remote = args.includes("-R");
+  const spec = args[args.indexOf(remote ? "-R" : "-L") + 1] ?? "";
+  const parsed = /^(\[[^\]]+\]|[^:]+):(\d+):(.+)$/.exec(spec);
+  if (!parsed) throw new Error("Invalid forward specification");
+  const unbracket = (value) => value.replace(/^\[|\]$/g, "");
+  const host = unbracket(parsed[1]);
+  const requestedPort = Number(parsed[2]);
+  const target = parsed[3];
+  const tcp = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(target);
+  const sockets = new Set();
+  let connections = 0;
+  if (connectionsFile) writeFileSync(connectionsFile, "0");
+  const server = net.createServer((socket) => {
+    if (connectionsFile) writeFileSync(connectionsFile, String(++connections));
+    if (mode === "busy") {
+      // Occupy the selected port as a foreign listener, without forwarding data.
+      socket.destroy();
+      return;
+    }
+    const upstream = tcp
+      ? net.createConnection({ host: unbracket(tcp[1]), port: Number(tcp[2]) })
+      : net.createConnection({ path: target });
+    sockets.add(socket);
+    sockets.add(upstream);
+    socket.on("error", () => upstream.destroy());
+    upstream.on("error", () => socket.destroy());
+    socket.on("close", () => {
+      sockets.delete(socket);
+      upstream.destroy();
+    });
+    upstream.on("close", () => {
+      sockets.delete(upstream);
+      socket.destroy();
+    });
+    socket.pipe(upstream).pipe(socket);
+  });
+  server.on("error", () => {
+    process.stderr.write("Warning: remote port forwarding failed\n");
+    process.exit(255);
+  });
+  const busy = () => {
+    process.stderr.write(
+      `debug1: Local forwarding listening on ${host} port ${requestedPort}.\n` +
+        `bind [${host}]:${requestedPort}: Address already in use\n` +
+        `channel_setup_fwd_listener_tcpip: cannot listen to port: ${requestedPort}\n` +
+        "Could not request local forwarding.\n",
+    );
+    process.exit(255);
+  };
+  if (mode === "busy" && !connectionsFile) {
+    busy();
+  }
+  if (mode === "jump") {
+    process.stderr.write("debug1: Entering interactive session.\n");
+    await Bun.sleep(300);
+  }
+  server.listen(requestedPort, host, async () => {
+    const port = server.address().port;
+    if (mode === "busy") {
+      // Let an unsafe TCP readiness probe hit the foreign listener before SSH fails.
+      setTimeout(busy, 300);
+      return;
+    }
+    if (!remote && args.includes("-v")) {
+      const diagnosticHost =
+        mode === "wrong-host"
+          ? "192.0.2.1"
+          : mode === "bracketed"
+            ? `[${host}]`
+            : host;
+      const diagnosticPort = mode === "wrong-port" ? 0 : port;
+      process.stderr.write(
+        `debug1: Local forwarding listening on ${diagnosticHost} port ${diagnosticPort}.\n`,
+      );
+      if (mode === "listening-only") return;
+      const success = "debug1: Entering interactive session.\n";
+      if (mode === "split") {
+        process.stderr.write(success.slice(0, 20));
+        setTimeout(() => process.stderr.write(success.slice(20)), 50);
+      } else process.stderr.write(success);
+    }
+    if (remote && args.includes("-v")) {
+      if (mode === "forward-fail" || mode === "forward-warning") {
+        process.stderr.write(
+          mode === "forward-fail"
+            ? "debug1: remote forward failure for: listen\n"
+            : "Warning: remote port forwarding failed\n",
+        );
+        return;
+      }
+      const success = `debug1: remote forward success for: listen ${host}:${port}, connect ${target}\n`;
+      const allocation = `Allocated port ${port} for remote forward to ${target}\n`;
+      if (mode === "allocation-after") {
+        process.stderr.write(success);
+        setTimeout(() => process.stderr.write(allocation), 120);
+      } else {
+        if (requestedPort === 0) process.stderr.write(allocation);
+        if (mode === "split") {
+          process.stderr.write(success.slice(0, 20));
+          setTimeout(() => process.stderr.write(success.slice(20)), 50);
+        } else process.stderr.write(success);
+      }
+      if (mode === "noisy") {
+        // Exit only after > pipe capacity has been drained by the parent after readiness.
+        for (let i = 0; i < 64; i++)
+          await Bun.write(Bun.stderr, "x".repeat(65536));
+        process.stderr.write("noise-complete\n");
+        process.exit(0);
+      }
+    }
+  });
+  const stop = () => {
+    for (const socket of sockets) socket.destroy();
+    server.close(() => process.exit(0));
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}
