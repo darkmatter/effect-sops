@@ -19,7 +19,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import * as Interaction from "../src/keyservice/interaction.ts";
 import * as Listen from "../src/keyservice/listen.ts";
-import { connect, serve } from "../src/keyservice/serve.ts";
+import { serve, Ssh } from "../src/KeyService.ts";
 import { runSopsAge } from "../src/sops-age.ts";
 import encrypted from "./fixtures/native.enc.json" with { type: "json" };
 
@@ -239,13 +239,13 @@ test("remote forwarding falls back to the Unix listener", () =>
     }),
   ));
 
-test("connect opens a usable local forward", () =>
+test("Ssh.localForward opens a usable local forward", () =>
   run(
     Effect.gen(function* () {
       const server = yield* serve({ listen: Listen.loopback(0), age });
       const address = server.addresses[0]!.address;
       if (address._tag !== "Tcp") throw new Error("Expected TCP listener");
-      const tunnel = yield* connect({
+      const tunnel = yield* Ssh.localForward({
         destination: "test-host",
         ssh: fakeSsh,
         remotePort: address.port,
@@ -355,6 +355,30 @@ test("serve logs bound URIs and warns only for unapproved network listeners", as
   );
 });
 
+test("automatic callback defaults warn for network listeners and remote forwards", async () => {
+  const warnings: Array<string> = [];
+  const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+    if (logLevel === "Warn") warnings.push(JSON.stringify(message));
+  });
+  await run(
+    Effect.gen(function* () {
+      yield* serve({
+        listen: Listen.tcp("0.0.0.0", 0),
+        age,
+        interaction: Interaction.make({ displayMessage: () => undefined }),
+      });
+      expect(warnings.length).toBe(1);
+      yield* serve({
+        listen: Listen.loopback(0),
+        age,
+        remoteForwards: [{ destination: "fixture", ssh: fakeSsh, remotePort: 0 }],
+      });
+      expect(warnings.length).toBe(2);
+    }).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger]))),
+  );
+  expect(warnings.length).toBe(2);
+});
+
 test.skipIf(!sopsAvailable || process.env.EFFECT_SOPS_SSH_SMOKE !== "1")(
   "Go SOPS decrypts through real localhost SSH forwards",
   () =>
@@ -367,7 +391,7 @@ test.skipIf(!sopsAvailable || process.env.EFFECT_SOPS_SSH_SMOKE !== "1")(
         });
         const address = server.addresses[0]!.address;
         if (address._tag !== "Tcp") throw new Error("Expected TCP listener");
-        const local = yield* connect({
+        const local = yield* Ssh.localForward({
           destination: "localhost",
           remotePort: address.port,
         });

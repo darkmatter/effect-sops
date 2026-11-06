@@ -15,7 +15,6 @@ import {
   type KeyHandler,
   type KeyServiceInteraction,
   type ListenAddress,
-  type SshLocalForwardOptions,
   type SshRemoteForwardOptions,
   type SshTunnel,
   type SshTunnelError,
@@ -39,6 +38,8 @@ export interface ServeOptions {
     }
   >;
   readonly requestTimeout?: Duration.Input;
+  /** Requests allowed to wait for their turn. Default: 16. */
+  readonly maxPendingRequests?: number;
   readonly logRequests?: boolean;
   readonly socketMode?: number;
   /** Tailscale discovery and executable overrides. */
@@ -85,11 +86,12 @@ export const serve: (
     );
     const interaction = options.interaction ?? Interaction.none;
     if (
-      interaction === Interaction.none &&
-      addresses.some(({ resolved }) => !isLoopback(resolved))
+      Interaction.approvesAutomatically(interaction) &&
+      (addresses.some(({ resolved }) => !isLoopback(resolved)) ||
+        (options.remoteForwards?.length ?? 0) > 0)
     )
       yield* Effect.logWarning(
-        "Keyservice is reachable from the network without approval; use Interaction.terminal() or Interaction.dialog() to approve requests",
+        "Keyservice is reachable from the network or an SSH remote host without approval; use Interaction.terminal() or Interaction.dialog() to approve requests",
       );
     const keys = options.keys ?? (yield* ageKeyHandler(options.age));
     const server = yield* makeServer({
@@ -99,6 +101,9 @@ export const serve: (
       ...(options.requestTimeout === undefined
         ? {}
         : { requestTimeout: options.requestTimeout }),
+      ...(options.maxPendingRequests === undefined
+        ? {}
+        : { maxPendingRequests: options.maxPendingRequests }),
       ...(options.logRequests === undefined
         ? {}
         : { logRequests: options.logRequests }),
@@ -122,6 +127,24 @@ export const serve: (
       (forward) =>
         Ssh.remoteForward({ ...forward, target: forward.target ?? target }),
     );
+    let running = true;
+    for (const tunnel of tunnels)
+      yield* tunnel.awaitExit.pipe(
+        Effect.andThen(() =>
+          running
+            ? Effect.logWarning("Keyservice SSH remote forward exited", {
+                destination: sanitizeForDisplay(tunnel.destination, 1024),
+              })
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+    // Finalizers run in reverse order: mark shutdown before interrupting watchers.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        running = false;
+      }),
+    );
     const uris = server.addresses.map(({ uri }) => uri);
     yield* Effect.logInfo("Keyservice listening", {
       uris: uris.map((uri) => sanitizeForDisplay(uri, 1024)),
@@ -135,12 +158,3 @@ export const serve: (
     ),
   );
 });
-
-/** Reach a keyservice from this machine through a scoped `ssh -L` forward. */
-export const connect: (
-  options: SshLocalForwardOptions,
-) => Effect.Effect<
-  SshTunnel,
-  SshTunnelError,
-  Scope.Scope | ChildProcessSpawner
-> = Ssh.localForward;

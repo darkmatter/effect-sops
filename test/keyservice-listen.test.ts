@@ -5,7 +5,8 @@ import * as BunServices from "@effect/platform-bun/BunServices";
 import * as Effect from "effect/Effect";
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import * as Listen from "../src/keyservice/listen.ts";
-import { keyServiceUri } from "../src/keyservice/address.ts";
+import { grpcBindTarget, keyServiceUri } from "../src/keyservice/address.ts";
+import { keyServiceTarget } from "../src/keyservice-client.ts";
 import type { ListenAddress } from "../src/keyservice/model.ts";
 
 const fake = `${import.meta.dir}/fixtures/ssh/tailscale-fake`;
@@ -72,11 +73,23 @@ test("constructors preserve addresses and use explicit loopback and Tailscale de
 test.each([
   ["127.0.0.1:5000", Listen.loopback()],
   ["localhost:0", Listen.tcp("localhost", 0)],
+  ["0.0.0.0:5000", Listen.tcp("0.0.0.0", 5000)],
+  ["[::]:5000", Listen.tcp("::", 5000)],
   ["[::1]:65535", Listen.tcp("::1", 65535)],
   ["[fd7a:115c:a1e0::1]:5000", Listen.tcp("fd7a:115c:a1e0::1", 5000)],
 ] as const)("fromSops parses TCP %s", async (address, expected) => {
   expect(await Effect.runPromise(Listen.fromSops("tcp", address))).toEqual(
     expected,
+  );
+});
+
+test("fromSops explains why an empty TCP host requires an explicit wildcard", async () => {
+  const error = await Effect.runPromise(
+    Listen.fromSops("tcp", ":5000").pipe(Effect.flip),
+  );
+  expect(error.reason).toBe("InvalidAddress");
+  expect(error.message).toBe(
+    "an empty host would listen on every interface; pass 0.0.0.0:5000 or [::]:5000 explicitly",
   );
 });
 
@@ -100,6 +113,15 @@ test.each([
   ["unix:///tmp/a%20b.sock", Listen.unix("/tmp/a b.sock")],
 ] as const)("fromUri parses %s", async (uri, expected) => {
   expect(await Effect.runPromise(Listen.fromUri(uri))).toEqual(expected);
+});
+
+test("Unix client URIs encode path segments while gRPC bind targets stay raw", async () => {
+  const address = { _tag: "Unix", path: "/tmp/a%20b #?/key service.sock" } as const;
+  const uri = keyServiceUri(address);
+  expect(uri).toBe("unix:///tmp/a%2520b%20%23%3F/key%20service.sock");
+  expect(await Effect.runPromise(Listen.fromUri(uri))).toEqual(address);
+  expect(keyServiceTarget(uri)).toBe(`unix:${address.path}`);
+  expect(grpcBindTarget(address)).toBe(`unix://${address.path}`);
 });
 
 test.each([
@@ -194,13 +216,14 @@ test("resolve preserves explicit TCP binding including wildcard, IPv6, and port 
   }
 });
 
-test("one non-internal IPv4 CGNAT candidate avoids the CLI", async () => {
+test("a Tailscale IPv6 address qualifies only its own interface's IPv4 address", async () => {
   const options = {
     tailscaleBinary: "/missing-tailscale",
     networkInterfaces: () => ({
       lo: [addressInfo("100.64.1.1", true)],
       wlan: [
         addressInfo("192.168.1.1"),
+        addressInfo("100.64.1.2"),
         addressInfo("100.63.255.255"),
         addressInfo("100.128.0.0"),
       ],
@@ -220,12 +243,41 @@ test.each(["100.64.0.0", "100.127.255.255"])(
       await run(
         Listen.tailscaleAddress({
           tailscaleBinary: "/missing-tailscale",
-          networkInterfaces: () => ({ utun: [addressInfo(address)] }),
+          networkInterfaces: () => ({
+            utun: [addressInfo(address), addressInfo("fd7a:115c:a1e0::1")],
+          }),
         }),
       ),
     ).toBe(address);
   },
 );
+
+test.each([
+  ["CGNAT only", { en0: [addressInfo("100.64.1.1")] }],
+  [
+    "Tailscale IPv6 on another interface",
+    {
+      en0: [addressInfo("100.64.1.1")],
+      utun: [addressInfo("fd7a:115c:a1e0::1")],
+    },
+  ],
+  [
+    "internal Tailscale IPv6",
+    {
+      utun: [addressInfo("100.64.1.1"), addressInfo("fd7a:115c:a1e0::1", true)],
+    },
+  ],
+] as const)("%s requires CLI confirmation for IPv4", async (_name, interfaces) => {
+  const options = { tailscaleBinary: fake, networkInterfaces: () => interfaces };
+  await withMode("ok", async () => {
+    expect(await run(Listen.tailscaleAddress(options))).toBe("100.104.7.108");
+  });
+  await withMode("fail", async () => {
+    const error = await run(Listen.tailscaleAddress(options).pipe(Effect.flip));
+    expect(error.reason).toBe("TailscaleUnavailable");
+    expect(error.message).toContain("exited with status 1");
+  });
+});
 
 test("IPv6 discovery selects only the Tailscale /48 prefix", async () => {
   const options = {
@@ -255,10 +307,13 @@ test.each([0, 2])(
       const options = {
         tailscaleBinary: fake,
         networkInterfaces: () => ({
-          utun: [addressInfo("100.64.1.1"), addressInfo("100.64.1.2")].slice(
-            0,
-            count,
-          ),
+          utun: [
+            addressInfo("fd7a:115c:a1e0::1"),
+            ...[addressInfo("100.64.1.1"), addressInfo("100.64.1.2")].slice(
+              0,
+              count,
+            ),
+          ],
         }),
       };
       expect(await run(Listen.tailscaleAddress(options))).toBe("100.104.7.108");

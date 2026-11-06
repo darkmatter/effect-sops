@@ -14,7 +14,7 @@ export const hostPort = (host: string, port: number): string =>
  */
 export const keyServiceUri = (address: ResolvedListenAddress): string =>
   address._tag === "Unix"
-    ? `unix://${address.path}`
+    ? `unix://${address.path.split("/").map(encodeURIComponent).join("/")}`
     : `tcp://${hostPort(address.host, address.port)}`;
 
 /** Target for `Server.bindAsync`: `host:port` or `unix:///absolute/path`. */

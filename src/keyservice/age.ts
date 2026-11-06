@@ -37,7 +37,7 @@ export interface AgeIdentities {
     string,
     ReadonlyArray<Redacted.Redacted<string>>
   >;
-  readonly nativeRecipients: ReadonlySet<string>;
+  readonly nativeRecipients: ReadonlyMap<string, Redacted.Redacted<string>>;
 }
 
 const keyCommand = Effect.fn("Age.keyCommand")(function* (
@@ -69,7 +69,7 @@ export const loadAgeIdentities = (
   options: AgeKeyServiceOptions,
   recipient?: string,
 ): Effect.Effect<AgeIdentities, KeyServiceError, ChildProcessSpawner> =>
-  collectIdentities(options, recipient).pipe(
+  collectIdentities(options, recipient, true).pipe(
     Effect.flatMap(({ identities, sources }) =>
       identities.native.length === 0 && identities.plugins.size === 0
         ? Effect.fail(
@@ -83,11 +83,15 @@ export const loadAgeIdentities = (
   );
 
 const collectIdentities = Effect.fn("Age.collectIdentities")(
-  function* (options: AgeKeyServiceOptions, recipient: string | undefined) {
+  function* (
+    options: AgeKeyServiceOptions,
+    recipient: string | undefined,
+    includeCommand: boolean,
+  ) {
     const env = { ...(options.env ?? process.env) };
     const native: Redacted.Redacted<string>[] = [];
     const plugins = new Map<string, Redacted.Redacted<string>[]>();
-    const nativeRecipients = new Set<string>();
+    const nativeRecipients = new Map<string, Redacted.Redacted<string>>();
     const sources: string[] = [];
     const add = Effect.fn("Age.addIdentity")(function* (text: string) {
       const line = text.trim();
@@ -108,8 +112,9 @@ const collectIdentities = Effect.fn("Age.collectIdentities")(
           catch: () => undefined,
         }).pipe(Effect.orElseSucceed(() => undefined));
         if (address) {
-          native.push(Redacted.make(line));
-          nativeRecipients.add(address.toLowerCase());
+          const identity = Redacted.make(line);
+          native.push(identity);
+          nativeRecipients.set(address.toLowerCase(), identity);
           return;
         }
       } else if (
@@ -120,9 +125,7 @@ const collectIdentities = Effect.fn("Age.collectIdentities")(
       }
       yield* Effect.logWarning("Skipping unrecognized or invalid age identity");
     });
-    const addLines = Effect.fn("Age.addIdentityLines")(function* (
-      text: string,
-    ) {
+    const addLines = Effect.fn("Age.addIdentityLines")(function* (text: string) {
       for (const line of text.split(/\r?\n/)) yield* add(line);
     });
     const file = Effect.fn("Age.readIdentityFile")(function* (
@@ -168,8 +171,8 @@ const collectIdentities = Effect.fn("Age.collectIdentities")(
       }
       sources.push("SOPS_AGE_KEY_FILE");
       if (env.SOPS_AGE_KEY_FILE) yield* file(env.SOPS_AGE_KEY_FILE);
-      sources.push("SOPS_AGE_KEY_CMD");
-      if (env.SOPS_AGE_KEY_CMD) {
+      if (includeCommand) sources.push("SOPS_AGE_KEY_CMD");
+      if (includeCommand && env.SOPS_AGE_KEY_CMD) {
         const output = yield* keyCommand(
           env.SOPS_AGE_KEY_CMD,
           env,
@@ -319,24 +322,6 @@ export const ageKeyHandler: (
   };
   const context = yield* Effect.context<ChildProcessSpawner>();
   const run = Effect.runPromiseWith(context);
-  // The server passes decrypt/encrypt the same key object it preflighted, so
-  // they reuse the identities their preflight loaded and SOPS_AGE_KEY_CMD
-  // (which may prompt, e.g. a password manager) runs once per request.
-  // Preflight itself always reloads, so every request sees current files.
-  const loaded = new WeakMap<KeyServiceKey, AgeIdentities>();
-  const identitiesFor = Effect.fn("Age.identitiesFor")(function* (
-    key: KeyServiceKey,
-    recipient: string,
-    reuse: boolean,
-  ) {
-    const cached = reuse ? loaded.get(key) : undefined;
-    if (cached) return cached;
-    const { identities } = yield* collectIdentities(options, recipient).pipe(
-      Effect.provide(context),
-    );
-    loaded.set(key, identities);
-    return identities;
-  });
   const matches = (
     identities: AgeIdentities,
     info: { readonly recipient: string; readonly plugin: string | undefined },
@@ -348,20 +333,19 @@ export const ageKeyHandler: (
       reason: "NoMatchingIdentity",
       message: `no age identity on this keyservice matches recipient ${sanitizeForDisplay(recipient)}`,
     });
-  // Runs before approval and never touches key material or spawns a plugin.
-  // Like sops, it loads identities (including SOPS_AGE_KEY_CMD) so keys this
-  // service cannot serve are refused without prompting the user.
+  // Commands may prompt, so preflight and encryption use only non-command sources.
   const check = Effect.fn("Age.check")(function* (
     operation: KeyServiceOperation,
     key: KeyServiceKey,
-    reuse: boolean,
   ) {
     const info = yield* recipientInfo(operation, key);
     if (operation === "encrypt") {
       if (info.plugin === undefined) return info;
-      const allowed =
-        options.encryptPlugins ??
-        [...(yield* identitiesFor(key, info.recipient, reuse)).plugins.keys()];
+      const allowed = options.encryptPlugins ?? [
+        ...(yield* collectIdentities(options, info.recipient, false).pipe(
+          Effect.provide(context),
+        )).identities.plugins.keys(),
+      ];
       if (!allowed.includes(info.plugin))
         return yield* Effect.fail(
           new KeyServiceError({
@@ -371,44 +355,48 @@ export const ageKeyHandler: (
         );
       return info;
     }
-    if (!matches(yield* identitiesFor(key, info.recipient, reuse), info)) {
-      loaded.delete(key);
+    const { identities } = yield* collectIdentities(
+      options,
+      info.recipient,
+      false,
+    ).pipe(Effect.provide(context));
+    // A command can supply identities after approval, so its keys cannot be ruled out yet.
+    const hasCommand =
+      discovers(options) && Boolean(options.env?.SOPS_AGE_KEY_CMD);
+    if (!matches(identities, info) && !hasCommand) {
       return yield* Effect.fail(noMatch(info.recipient));
     }
     return info;
   });
-  const forget = (key: KeyServiceKey) =>
-    Effect.sync(() => {
-      loaded.delete(key);
-    });
   return {
-    preflight: (operation, key) =>
-      check(operation, key, false).pipe(Effect.asVoid),
+    preflight: (operation, key) => check(operation, key).pipe(Effect.asVoid),
     decrypt: Effect.fn("Age.decrypt")(
       function* ({ request, ciphertext, interaction }) {
-        const info = yield* check("decrypt", request.key, true);
-        const identities = yield* identitiesFor(
-          request.key,
+        const info = yield* recipientInfo("decrypt", request.key);
+        const { identities } = yield* collectIdentities(
+          options,
           info.recipient,
           true,
-        );
+        ).pipe(Effect.provide(context));
+        if (!matches(identities, info))
+          return yield* Effect.fail(noMatch(info.recipient));
         const plugin = info.plugin;
         return yield* Effect.tryPromise({
           try: async (signal) => {
             const decrypter = new Decrypter();
-            for (const identity of identities.native)
-              decrypter.addIdentity(Redacted.value(identity));
-            const groups = [...identities.plugins];
-            groups.sort(
-              ([left], [right]) =>
-                Number(right === plugin) - Number(left === plugin),
-            );
-            for (const [name, group] of groups)
+            const identity =
+              plugin === undefined
+                ? identities.nativeRecipients.get(info.recipient)
+                : undefined;
+            if (identity) decrypter.addIdentity(Redacted.value(identity));
+            const group =
+              plugin === undefined ? undefined : identities.plugins.get(plugin);
+            if (plugin !== undefined && group)
               decrypter.addIdentity({
                 unwrapFileKey: async (stanzas) =>
                   (await run(
                     unwrapFileKey(
-                      name,
+                      plugin,
                       group.map(Redacted.value),
                       stanzas.map((stanza) => ({
                         type: stanza.args[0] ?? "",
@@ -440,18 +428,13 @@ export const ageKeyHandler: (
           catch: ageError,
         });
       },
-      (effect, { request }) => effect.pipe(Effect.ensuring(forget(request.key))),
     ),
     encrypt: Effect.fn("Age.encrypt")(function* ({
       request,
       plaintext,
       interaction,
     }) {
-      const { recipient, plugin } = yield* check(
-        "encrypt",
-        request.key,
-        true,
-      ).pipe(Effect.ensuring(forget(request.key)));
+      const { recipient, plugin } = yield* check("encrypt", request.key);
       return yield* Effect.tryPromise({
         try: async (signal) => {
           const encrypter = new Encrypter();

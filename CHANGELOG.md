@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- Keyservice decryption uses only the approved recipient's native identity or
+  matching plugin group. `SOPS_AGE_KEY_CMD` runs only after approval, so a
+  command-only identity cannot be refused as missing before the prompt.
+- Keyservice requests default to five minutes from the start of their turn,
+  excluding queue time, with at most `maxPendingRequests` waiting (default: 16).
+- Keyservices warn about automatic approval on non-loopback listeners and SSH
+  remote forwards, and log dropped remote-forward destinations. Promise
+  handles expose `tunnels[i].exited` to observe forward termination.
+- `startKeyService` rejects `listen` combined with `network`, `address`, or
+  `tailscale`. Use `Ssh.localForward` for the scoped Effect SSH client; the
+  `connect` alias and public address helper re-exports were removed.
+- Documented keyservice limits: SSH age keys are unsupported unlike upstream
+  SOPS; TCP addresses require a host instead of `:5000`; all `ssh -R` peers
+  appear as `127.0.0.1`, so remembered approvals cover every reachable user of
+  the remote host. SSH transport forwards remain supported.
+- Documented Alchemy lifecycle behavior: a dead remote forward closes the
+  whole keyservice instance; the next plan or deploy restarts it, with no
+  automatic restart between plans.
 - Native keyservice timeouts now interrupt stalled local identity discovery and
   document decryption. Effect scopes release gRPC clients and erase recovered
   data keys on completion, failure, timeout, and interruption.

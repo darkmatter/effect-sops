@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as net from "node:net";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,6 +118,7 @@ describe("SSH argument builders", () => {
       "-o",
       "BatchMode=no",
       ...defaults,
+      "-v",
       "-L",
       "127.0.0.1:1234:127.0.0.1:5000",
       "--",
@@ -186,6 +188,90 @@ describe("SSH argument builders", () => {
 });
 
 describe("SSH forwards", () => {
+  test("busy explicit local ports fail before spawning SSH", async () => {
+    const server = await echo();
+    const dir = await mkdtemp(join(tmpdir(), "ssh-busy-explicit-"));
+    const pidFile = join(dir, "pid");
+    try {
+      const failure = await run(
+        Effect.flip(
+          localForward({
+            ...options,
+            localPort: server.port,
+            sshArgs: ["-o", `FakePidFile=${pidFile}`],
+          }),
+        ),
+      );
+      expect(failure.reason).toBe("ForwardFailed");
+      expect(failure.message).toBe(`local port ${server.port} is already in use`);
+      expect(existsSync(pidFile)).toBe(false);
+    } finally {
+      await server.close();
+      await rm(dir, { recursive: true });
+    }
+  });
+  test("local SSH bind rejection includes its diagnostics", async () => {
+    await mode("busy", async () => {
+      const failure = await run(Effect.flip(localForward(options)));
+      expect(failure.reason).toBe("ForwardFailed");
+      expect(failure.stderr).toContain("Address already in use");
+      expect(failure.stderr).toContain("Could not request local forwarding");
+    });
+  });
+  test("a foreign listener taking the auto-selected port never becomes a tunnel or receives probes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ssh-busy-race-"));
+    const pidFile = join(dir, "pid");
+    const connectionsFile = join(dir, "connections");
+    try {
+      await mode("busy", () =>
+        run(
+          Effect.gen(function* () {
+            const failure = yield* Effect.flip(
+              localForward({
+                ...options,
+                sshArgs: [
+                  "-o",
+                  `FakePidFile=${pidFile}`,
+                  "-o",
+                  `FakeConnectionsFile=${connectionsFile}`,
+                ],
+              }),
+            );
+            expect(failure.reason).toBe("ForwardFailed");
+            const connections = yield* Effect.promise(() =>
+              readFile(connectionsFile, "utf8"),
+            );
+            expect(Number(connections)).toBe(0);
+            const pid = yield* Effect.promise(() => readFile(pidFile, "utf8"));
+            assertExited(Number(pid));
+          }),
+        ),
+      );
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+  test("a local listening diagnostic alone never marks a tunnel ready", async () => {
+    await mode("listening-only", async () => {
+      const failure = await run(
+        Effect.flip(
+          localForward({ ...options, readyTimeout: "250 millis" }),
+        ),
+      );
+      expect(failure.reason).toBe("TimedOut");
+      expect(failure.stderr).toContain("Local forwarding listening on");
+    });
+  });
+  test("local readiness diagnostics may span chunks", async () => {
+    await mode("split", () =>
+      run(
+        Effect.gen(function* () {
+          const tunnel = yield* localForward(options);
+          expect(tunnel.bindPort).toBeGreaterThan(0);
+        }),
+      ),
+    );
+  });
   test("validates destinations and ports before spawning", async () => {
     for (const destination of [
       "",

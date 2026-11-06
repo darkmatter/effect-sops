@@ -77,7 +77,7 @@ test("fixture data key decrypts the SOPS document through the public handler", a
       interaction: scripted().interaction,
     }),
   );
-  expect(dataKey).toHaveLength(32);
+  expect(dataKey.length).toBe(32);
   const decrypted: unknown = await decryptSops(document, { dataKey });
   expect(decrypted).toMatchObject({ api: { token: "native-token" } });
 });
@@ -113,20 +113,11 @@ test("loads each discovery source in order, retains plugin groups and skips comm
         recipient,
       ),
     );
-    expect(loaded.native.map(Redacted.value)).toEqual([identity]);
-    expect([...loaded.nativeRecipients]).toEqual([recipient]);
+    expect(loaded.native.length).toBe(1);
+    expect([...loaded.nativeRecipients.keys()]).toEqual([recipient]);
     expect([...loaded.plugins.keys()]).toEqual(["fake", "other"]);
-    expect(loaded.plugins.get("fake")?.map(Redacted.value)).toEqual([
-      pluginIdentity,
-      "AGE-PLUGIN-FAKE-1pppp",
-      "AGE-PLUGIN-FAKE-1ssss",
-      "AGE-PLUGIN-FAKE-1rrrr",
-      "AGE-PLUGIN-FAKE-1tttt",
-    ]);
-    expect(loaded.plugins.get("other")?.map(Redacted.value)).toEqual([
-      "AGE-PLUGIN-OTHER-1pppp",
-      "AGE-PLUGIN-OTHER-1qqqq",
-    ]);
+    expect(loaded.plugins.get("fake")?.length).toBe(5);
+    expect(loaded.plugins.get("other")?.length).toBe(2);
   }));
 
 test("loads native whitespace-separated environment identities and hybrid native recipients", () =>
@@ -141,10 +132,11 @@ test("loads native whitespace-separated environment identities and hybrid native
         },
       }),
     );
-    expect(loaded.native.map(Redacted.value)).toEqual([identity, hybrid]);
-    expect(loaded.nativeRecipients).toEqual(
-      new Set([recipient, await identityToRecipient(hybrid)]),
-    );
+    expect(loaded.native.length).toBe(2);
+    expect([...loaded.nativeRecipients.keys()]).toEqual([
+      recipient,
+      await identityToRecipient(hybrid),
+    ]);
   }));
 
 test("uses the platform default config directory when XDG_CONFIG_HOME is absent", () =>
@@ -156,10 +148,9 @@ test("uses the platform default config directory when XDG_CONFIG_HOME is absent"
     await mkdir(join(base, "sops", "age"), { recursive: true });
     await writeFile(join(base, "sops", "age", "keys.txt"), identity);
     expect(
-      (await run(loadAgeIdentities({ env: { HOME: directory } }))).native.map(
-        Redacted.value,
-      ),
-    ).toEqual([identity]);
+      (await run(loadAgeIdentities({ env: { HOME: directory } }))).native
+        .length,
+    ).toBe(1);
   }));
 
 test("an explicit env without HOME never reads the process home's keys.txt", async () => {
@@ -183,14 +174,14 @@ test("an explicit env without HOME never reads the process home's keys.txt", asy
       loadAgeIdentities({ env: { SOPS_AGE_KEY: identity } }),
     );
     // Compare recipients, never identities, so a failure cannot print keys.
-    expect([...loaded.nativeRecipients]).toEqual([recipient]);
+    expect([...loaded.nativeRecipients.keys()]).toEqual([recipient]);
   } finally {
     for (const config of configs)
       await rm(join(config, "sops"), { recursive: true, force: true });
   }
 });
 
-test("SOPS_AGE_KEY_CMD runs once per request and lets preflight refuse unservable keys", () =>
+test("preflight never runs the key command; decrypt reloads it once per request", () =>
   temporary(async (directory) => {
     const runs = join(directory, "command-runs");
     const handler = await run(
@@ -204,30 +195,214 @@ test("SOPS_AGE_KEY_CMD runs once per request and lets preflight refuse unservabl
       (await Bun.file(runs).exists())
         ? (await readFile(runs, "utf8")).split("\n").filter(Boolean).length
         : 0;
-    // Preflight loads the command's identities; decrypt of the same request
-    // (same key object, as the server passes it) reuses them.
     await run(handler.preflight("decrypt", nativeKey));
-    const dataKey = await run(
-      handler.decrypt({
-        request: nativeRequest,
+    await run(
+      handler.preflight("decrypt", {
+        type: "age",
+        recipient: await identityToRecipient(await generateX25519Identity()),
+      }),
+    );
+    expect(await count()).toBe(0);
+    // Reusing the same request object must not reuse command output.
+    for (let calls = 1; calls <= 2; calls++) {
+      const dataKey = await run(
+        handler.decrypt({
+          request: nativeRequest,
+          ciphertext,
+          interaction: scripted().interaction,
+        }),
+      );
+      expect(dataKey.length).toBe(32);
+      expect(await count()).toBe(calls);
+    }
+  }));
+
+test("decrypt uses only the native identity named by the request", async () => {
+  const otherIdentity = await generateX25519Identity();
+  const otherRecipient = await identityToRecipient(otherIdentity);
+  let pluginCalls = 0;
+  const handler = await run(
+    ageKeyHandler({
+      identities: [otherIdentity, identity, pluginIdentity],
+      env: {},
+      pluginBinary: () => {
+        pluginCalls++;
+        return binary;
+      },
+    }),
+  );
+  const otherKey: KeyServiceKey = { type: "age", recipient: otherRecipient };
+  await run(handler.preflight("decrypt", otherKey));
+  const result = await run(
+    handler
+      .decrypt({
+        request: { ...nativeRequest, key: otherKey },
         ciphertext,
+        interaction: scripted().interaction,
+      })
+      .pipe(
+        Effect.match({
+          onSuccess: () => "decrypted",
+          onFailure: (error) => error.reason,
+        }),
+      ),
+  );
+  expect(result).toBe("NoMatchingIdentity");
+  const dataKey = await run(
+    handler.decrypt({
+      request: nativeRequest,
+      ciphertext,
+      interaction: scripted().interaction,
+    }),
+  );
+  expect(dataKey.length).toBe(32);
+  expect(pluginCalls).toBe(0);
+});
+
+test("plugin requests never fall back to loaded native identities or another group", () =>
+  temporary(async (directory) => {
+    const names: string[] = [];
+    const fake = await plugin(directory, "plain");
+    const handler = await run(
+      ageKeyHandler({
+        identities: [identity, pluginIdentity, "AGE-PLUGIN-OTHER-1qqqq"],
+        env: {},
+        pluginBinary: (name) => {
+          names.push(name);
+          return name === "fake" ? fake() : "/never-run-other-plugin";
+        },
+      }),
+    );
+    const result = await run(
+      handler
+        .decrypt({
+          request,
+          ciphertext,
+          interaction: scripted().interaction,
+        })
+        .pipe(
+          Effect.match({
+            onSuccess: () => "decrypted",
+            onFailure: (error) => error.reason,
+          }),
+        ),
+    );
+    expect(result).toBe("NoMatchingIdentity");
+    expect(names).toEqual(["fake"]);
+  }));
+
+test("plugin errors do not try other plugin groups", () =>
+  temporary(async (directory) => {
+    const names: string[] = [];
+    const fake = await plugin(directory, "crash");
+    const handler = await run(
+      ageKeyHandler({
+        identities: [pluginIdentity, "AGE-PLUGIN-OTHER-1qqqq"],
+        env: {},
+        pluginBinary: (name) => {
+          names.push(name);
+          return name === "fake" ? fake() : "/never-run-other-plugin";
+        },
+      }),
+    );
+    const result = await run(
+      handler
+        .decrypt({
+          request,
+          ciphertext,
+          interaction: scripted().interaction,
+        })
+        .pipe(
+          Effect.match({
+            onSuccess: () => "decrypted",
+            onFailure: (error) => error.reason,
+          }),
+        ),
+    );
+    expect(result).toBe("PluginFailed");
+    expect(names).toEqual(["fake"]);
+  }));
+
+test("plugin encrypt derives its allowlist without running the key command", () =>
+  temporary(async (directory) => {
+    const marker = join(directory, "command-ran");
+    const env = {
+      SOPS_AGE_KEY_CMD: `touch ${quote(marker)} && echo ${quote(pluginIdentity)}`,
+    };
+    const denied = await run(ageKeyHandler({ env }));
+    expect(
+      (await run(Effect.flip(denied.preflight("encrypt", pluginKey)))).reason,
+    ).toBe("UnsupportedKey");
+    const deniedEncrypt = await run(
+      denied
+        .encrypt({
+          request: { ...request, operation: "encrypt" },
+          plaintext,
+          interaction: scripted().interaction,
+        })
+        .pipe(
+          Effect.match({
+            onSuccess: () => "encrypted",
+            onFailure: (error) => error.reason,
+          }),
+        ),
+    );
+    expect(deniedEncrypt).toBe("UnsupportedKey");
+    const allowed = await run(
+      ageKeyHandler({
+        identities: [pluginIdentity],
+        discover: true,
+        pluginBinary: await plugin(directory, "plain"),
+        env,
+      }),
+    );
+    await run(allowed.preflight("encrypt", pluginKey));
+    const encrypted = await run(
+      allowed.encrypt({
+        request: { ...request, operation: "encrypt" },
+        plaintext,
         interaction: scripted().interaction,
       }),
     );
-    expect(dataKey).toHaveLength(32);
-    expect(await count()).toBe(1);
-    // A recipient the command cannot serve is refused before any approval.
-    const failure = await run(
-      Effect.flip(
-        handler.preflight("decrypt", {
-          type: "age",
-          recipient: `age1${"q".repeat(58)}`,
-        }),
-      ),
-    );
-    expect(failure.reason).toBe("NoMatchingIdentity");
-    expect(await count()).toBe(2);
+    expect(encrypted.length).toBeGreaterThan(0);
+    expect(await Bun.file(marker).exists()).toBe(false);
   }));
+
+test.each([{ discover: false }, { identities: [] }, { identityFiles: [] }])(
+  "disabled discovery refuses unknown recipients without running commands: %j",
+  (options) =>
+    temporary(async (directory) => {
+      const marker = join(directory, "command-ran");
+      const handler = await run(
+        ageKeyHandler({
+          ...options,
+          env: {
+            SOPS_AGE_KEY_CMD: `touch ${quote(marker)} && echo ${quote(identity)}`,
+          },
+        }),
+      );
+      expect(
+        (await run(Effect.flip(handler.preflight("decrypt", nativeKey))))
+          .reason,
+      ).toBe("NoMatchingIdentity");
+      const result = await run(
+        handler
+          .decrypt({
+            request: nativeRequest,
+            ciphertext,
+            interaction: scripted().interaction,
+          })
+          .pipe(
+            Effect.match({
+              onSuccess: () => "decrypted",
+              onFailure: (error) => error.reason,
+            }),
+          ),
+      );
+      expect(result).toBe("NoMatchingIdentity");
+      expect(await Bun.file(marker).exists()).toBe(false);
+    }),
+);
 
 test("native encrypt never loads identities", () =>
   temporary(async (directory) => {
@@ -283,7 +458,7 @@ test("failing sources do not discard usable identities", () =>
         },
       }),
     );
-    expect(loaded.native.map(Redacted.value)).toEqual([identity]);
+    expect(loaded.native.length).toBe(1);
   }));
 
 test("empty discovery reports source names and paths without source contents", () =>
@@ -338,14 +513,16 @@ test("handler snapshots its environment and rereads identity files on every requ
     await run(handler.preflight("decrypt", pluginKey));
     await writeFile(path, identity);
     expect(
-      await run(
-        handler.decrypt({
-          request: nativeRequest,
-          ciphertext,
-          interaction: scripted().interaction,
-        }),
-      ),
-    ).toHaveLength(32);
+      (
+        await run(
+          handler.decrypt({
+            request: nativeRequest,
+            ciphertext,
+            interaction: scripted().interaction,
+          }),
+        )
+      ).length,
+    ).toBe(32);
   }));
 
 test("preflight distinguishes supported keys, missing identities and malformed recipients", async () => {
@@ -447,14 +624,16 @@ test("native encrypt returns armor and decrypt accepts both armored and binary f
   expect(armored.startsWith("-----BEGIN AGE ENCRYPTED FILE-----")).toBe(true);
   for (const value of [encrypted, armor.decode(armored)])
     expect(
-      await run(
-        decryptor.decrypt({
-          request: nativeRequest,
-          ciphertext: value,
-          interaction,
-        }),
-      ),
-    ).toEqual(plaintext);
+      Buffer.from(
+        await run(
+          decryptor.decrypt({
+            request: nativeRequest,
+            ciphertext: value,
+            interaction,
+          }),
+        ),
+      ).equals(Buffer.from(plaintext)),
+    ).toBe(true);
 });
 
 test("bad armor, invalid headers and invalid header HMAC are InvalidRequest", async () => {
@@ -525,10 +704,12 @@ test("plugin encrypt and PIN decrypt round trip with secret request context", ()
       }),
     );
     expect(
-      await run(
-        handler.decrypt({ request, ciphertext: encrypted, interaction }),
-      ),
-    ).toEqual(plaintext);
+      Buffer.from(
+        await run(
+          handler.decrypt({ request, ciphertext: encrypted, interaction }),
+        ),
+      ).equals(Buffer.from(plaintext)),
+    ).toBe(true);
     expect(calls).toEqual([
       {
         kind: "value",
@@ -639,18 +820,20 @@ test("a matching native identity prevents spawning plugins even when listed late
     }),
   );
   expect(
-    await run(
-      handler.decrypt({
-        request: nativeRequest,
-        ciphertext,
-        interaction: scripted().interaction,
-      }),
-    ),
-  ).toHaveLength(32);
+    (
+      await run(
+        handler.decrypt({
+          request: nativeRequest,
+          ciphertext,
+          interaction: scripted().interaction,
+        }),
+      )
+    ).length,
+  ).toBe(32);
   expect(resolved).toBe(false);
 });
 
-test("the request's plugin group runs before other loaded plugin groups", () =>
+test("the request's plugin group is the only group used for successful decryption", () =>
   temporary(async (directory) => {
     const fake = await plugin(directory, "plain");
     const names: string[] = [];
@@ -674,10 +857,12 @@ test("the request's plugin group runs before other loaded plugin groups", () =>
     );
     names.length = 0;
     expect(
-      await run(
-        handler.decrypt({ request, ciphertext: encrypted, interaction }),
-      ),
-    ).toEqual(plaintext);
+      Buffer.from(
+        await run(
+          handler.decrypt({ request, ciphertext: encrypted, interaction }),
+        ),
+      ).equals(Buffer.from(plaintext)),
+    ).toBe(true);
     expect(names).toEqual(["fake"]);
   }));
 

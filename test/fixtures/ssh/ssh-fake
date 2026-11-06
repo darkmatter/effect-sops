@@ -7,6 +7,9 @@ const mode = process.env.FAKE_SSH_MODE ?? "normal";
 const pidFile = args
   .find((arg) => arg.startsWith("FakePidFile="))
   ?.slice("FakePidFile=".length);
+const connectionsFile = args
+  .find((arg) => arg.startsWith("FakeConnectionsFile="))
+  ?.slice("FakeConnectionsFile=".length);
 if (pidFile) writeFileSync(pidFile, String(process.pid));
 if (mode === "noisy-fail") {
   await Bun.write(Bun.stderr, "x".repeat(100000));
@@ -32,7 +35,15 @@ if (mode === "noisy-fail") {
   const target = parsed[3];
   const tcp = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(target);
   const sockets = new Set();
+  let connections = 0;
+  if (connectionsFile) writeFileSync(connectionsFile, "0");
   const server = net.createServer((socket) => {
+    if (connectionsFile) writeFileSync(connectionsFile, String(++connections));
+    if (mode === "busy") {
+      // Occupy the selected port as a foreign listener, without forwarding data.
+      socket.destroy();
+      return;
+    }
     const upstream = tcp
       ? net.createConnection({ host: unbracket(tcp[1]), port: Number(tcp[2]) })
       : net.createConnection({ path: target });
@@ -54,8 +65,36 @@ if (mode === "noisy-fail") {
     process.stderr.write("Warning: remote port forwarding failed\n");
     process.exit(255);
   });
+  const busy = () => {
+    process.stderr.write(
+      `debug1: Local forwarding listening on ${host} port ${requestedPort}.\n` +
+        `bind [${host}]:${requestedPort}: Address already in use\n` +
+        `channel_setup_fwd_listener_tcpip: cannot listen to port: ${requestedPort}\n` +
+        "Could not request local forwarding.\n",
+    );
+    process.exit(255);
+  };
+  if (mode === "busy" && !connectionsFile) {
+    busy();
+  }
   server.listen(requestedPort, host, async () => {
     const port = server.address().port;
+    if (mode === "busy") {
+      // Let an unsafe TCP readiness probe hit the foreign listener before SSH fails.
+      setTimeout(busy, 300);
+      return;
+    }
+    if (!remote && args.includes("-v")) {
+      process.stderr.write(
+        `debug1: Local forwarding listening on ${host} port ${port}.\n`,
+      );
+      if (mode === "listening-only") return;
+      const success = "debug1: Entering interactive session.\n";
+      if (mode === "split") {
+        process.stderr.write(success.slice(0, 20));
+        setTimeout(() => process.stderr.write(success.slice(20)), 50);
+      } else process.stderr.write(success);
+    }
     if (remote && args.includes("-v")) {
       if (mode === "forward-fail" || mode === "forward-warning") {
         process.stderr.write(

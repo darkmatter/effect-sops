@@ -7,6 +7,7 @@ import * as BunServices from "@effect/platform-bun/BunServices";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
@@ -121,12 +122,21 @@ describe("keyservice Promise facade", () => {
     );
   });
 
-  test("explicit listeners override convenience options", async () => {
+  test("explicit listeners reject conflicting convenience options", async () => {
+    for (const convenience of [
+      { address: "127.0.0.1:0" },
+      { network: "tcp" as const },
+      { tailscale: true },
+      { tailscale: false },
+    ])
+      await expect(
+        startKeyService({ age: base.age, listen: Listen.loopback(0), ...convenience }),
+      ).rejects.toThrow("Choose listen or network, address, and tailscale");
+  });
+
+  test("explicit listeners serve each address", async () => {
     await using handle = await startKeyService({
-      ...base,
-      address: "invalid",
-      network: "unix",
-      tailscale: true,
+      age: base.age,
       listen: [Listen.loopback(0), Listen.loopback(0)],
     });
     expect(handle.addresses).toHaveLength(2);
@@ -172,6 +182,55 @@ describe("keyservice Promise facade", () => {
       interaction: { approve: () => Effect.succeed(false) },
     });
     await expect(decrypt(handle.uri)).rejects.toThrow("gRPC status 7");
+  });
+
+  test("maxPendingRequests limits waiting requests through the Promise facade", async () => {
+    let approvals = 0;
+    let release: ((approved: boolean) => void) | undefined;
+    await using handle = await startKeyService({
+      ...base,
+      maxPendingRequests: 0,
+      interaction: {
+        approve: () => new Promise<boolean>((resolve) => {
+          approvals++;
+          release = resolve;
+        }),
+      },
+    });
+    const first = decrypt(handle.uri).then(() => true, () => false);
+    try {
+      await waitUntil(() => approvals === 1);
+      await expect(decrypt(handle.uri)).rejects.toThrow("gRPC status 8");
+      expect(approvals).toBe(1);
+      release?.(true);
+      expect(await first).toBe(true);
+    } finally {
+      release?.(false);
+      await first;
+    }
+  });
+
+  test("automatic custom interactions still warn with remembered approvals", async () => {
+    const warnings: Array<string> = [];
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      if (logLevel === "Warn") warnings.push(JSON.stringify(message));
+    });
+    for (const interaction of [
+      { displayMessage: () => undefined },
+      Interaction.make({ displayMessage: () => undefined }),
+      { ...Interaction.none },
+    ]) {
+      await using handle = await startKeyService({
+        ...base,
+        address: "0.0.0.0:0",
+        interaction,
+        rememberApproval: "1 minute",
+        layer: Layer.merge(BunServices.layer, Logger.layer([logger])),
+      });
+      expect(handle.uris.length).toBe(1);
+    }
+    expect(warnings.length).toBe(3);
+    expect(warnings.every((message) => message.includes("without approval"))).toBe(true);
   });
 
   test("supports an explicit Node platform layer", async () => {
@@ -351,7 +410,52 @@ describe("keyservice Promise facade", () => {
     } finally {
       await handle.close();
     }
+    await remote.exited;
     expect(await reachable(remote.bindPort)).toBe(false);
+  });
+
+  test("each remote forward reports exit while normal service close stays quiet", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "promise-remote-exit-"));
+    const warnings: Array<string> = [];
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      if (logLevel === "Warn") warnings.push(JSON.stringify(message));
+    });
+    try {
+      const destinations = ["fixture-one", "fixture-two", "fixture-close"];
+      const handle = await startKeyService({
+        ...base,
+        interaction: { approve: () => true },
+        layer: Layer.merge(BunServices.layer, Logger.layer([logger])),
+        ssh: destinations.map((destination) => ({
+          destination,
+          ssh: fakeSsh,
+          remotePort: 0,
+          sshArgs: ["-o", `FakePidFile=${join(directory, destination)}`],
+        })),
+      });
+      try {
+        for (const index of [0, 1]) {
+          const tunnel = handle.tunnels[index];
+          const destination = destinations[index];
+          if (!tunnel || !destination) throw new Error("Missing remote forward");
+          const pid = Number(await readFile(join(directory, destination), "utf8"));
+          process.kill(pid, "SIGTERM");
+          await tunnel.exited;
+          await waitUntil(() => warnings.length === index + 1);
+          expect(warnings[index]?.includes(destination)).toBe(true);
+          expect(warnings[index]?.includes("remote forward exited")).toBe(true);
+          expect(await reachable(tunnel.bindPort)).toBe(false);
+          expect(JSON.parse(await decrypt(handle.uri)).nested.count).toBe(3);
+        }
+      } finally {
+        await handle.close();
+      }
+      await Promise.all(handle.tunnels.map(({ exited }) => exited));
+      expect(warnings.length).toBe(2);
+      for (const tunnel of handle.tunnels) expect(await reachable(tunnel.bindPort)).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("tunnel exited observes process exit and async disposal remains safe", async () => {

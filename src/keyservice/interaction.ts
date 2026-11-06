@@ -32,6 +32,11 @@ const pluginLabel = (context: PluginPromptContext): string =>
 const waitingMessage = (context: PluginPromptContext): string =>
   `${pluginLabel(context)} waiting for the plugin (touch your security key if it is blinking)\n`;
 
+const promptOrigin = ({ request }: PluginPromptContext): string =>
+  request === undefined
+    ? ""
+    : `\nFor ${request.operation === "decrypt" ? "a decryption" : "an encryption"} request from ${sanitizeForDisplay(request.peerHost ?? request.peer, 80)}.`;
+
 /** Approve requests without prompting; plugin follow-ups require an interactive implementation. */
 export const none: KeyServiceInteraction = {
   approve: () => Effect.succeed(true),
@@ -41,6 +46,11 @@ export const none: KeyServiceInteraction = {
   confirm: () => Effect.fail(unavailable),
   waiting: (context) => Effect.log(waitingMessage(context)),
 };
+
+/** Whether the interaction uses the default approval that never asks the user. */
+export const approvesAutomatically = (
+  interaction: KeyServiceInteraction,
+): boolean => interaction.approve === none.approve;
 
 type HandlerResult<A> = A | Promise<A> | Effect.Effect<A, unknown>;
 
@@ -75,16 +85,18 @@ const invoke = <A>(
       ? Effect.tryPromise({ try: () => value, catch: () => undefined })
       : Effect.succeed(value);
   }).pipe(
-    Effect.catchCause((cause) =>
-      Cause.hasInterrupts(cause)
-        ? Effect.interrupt
-        : Effect.fail(
-            new KeyServiceInteractionError({
+    Effect.catchCause((cause) => {
+      if (Cause.hasInterrupts(cause)) return Effect.interrupt;
+      const error = cause.reasons.find(Cause.isFailReason)?.error;
+      return Effect.fail(
+        error instanceof KeyServiceInteractionError
+          ? error
+          : new KeyServiceInteractionError({
               reason: "Failed",
               message: "Interaction handler failed",
             }),
-          ),
-    ),
+      );
+    }),
   );
 
 const bestEffort = <E>(effect: Effect.Effect<void, E>): Effect.Effect<void> =>
@@ -153,6 +165,9 @@ export const remember: (
 ) => Effect.Effect<KeyServiceInteraction> = Effect.fn(
   "KeyServiceInteraction.remember",
 )(function* (base, options) {
+  // Nothing to remember when every request is approved anyway; returning the
+  // base keeps `approvesAutomatically` (and the server's exposure warning) true.
+  if (approvesAutomatically(base)) return base;
   const grants = yield* Ref.make<ReadonlyArray<ApprovalGrant>>([]);
   const clock = yield* Clock.Clock;
   const now = Clock.currentTimeMillis.pipe(
@@ -182,15 +197,12 @@ export const remember: (
   };
 });
 
-/** Terminal prompts currently require no configuration beyond the supplied Terminal service. */
-export type TerminalOptions = Readonly<Record<string, never>>;
-
 /** Construct terminal approval and plugin prompts, capturing the provided terminal service. */
-export const terminal: (
-  options?: TerminalOptions,
-) => Effect.Effect<KeyServiceInteraction, never, Terminal.Terminal> = Effect.fn(
-  "KeyServiceInteraction.terminal",
-)(function* (_options = {}) {
+export const terminal: () => Effect.Effect<
+  KeyServiceInteraction,
+  never,
+  Terminal.Terminal
+> = Effect.fn("KeyServiceInteraction.terminal")(function* () {
   const terminal = yield* Terminal.Terminal;
   const sanitize = (text: string) => sanitizeForDisplay(text, 400);
   const cancelled = new KeyServiceInteractionError({
@@ -269,15 +281,17 @@ export const terminal: (
       display(`${pluginLabel(context)} ${sanitize(message)}\n`),
     requestValue: Effect.fn("KeyServiceInteraction.terminal.requestValue")(
       function* (context, prompt, secret) {
-        yield* display(`${pluginLabel(context)} ${sanitize(prompt)} `);
+        yield* display(
+          `${pluginLabel(context)} ${sanitize(prompt)}${promptOrigin(context)} `,
+        );
         return secret ? yield* readSecret : Redacted.make(yield* readLine);
       },
     ),
-    confirm: (_context, prompt, yes, no) => {
+    confirm: (context, prompt, yes, no) => {
       const yesLabel = sanitize(yes);
       const noLabel = no === undefined ? undefined : sanitize(no);
       return choose(
-        `${sanitize(prompt)} [${yesLabel}${noLabel === undefined ? "" : `/${noLabel}`}] `,
+        `${sanitize(prompt)}${promptOrigin(context)} [${yesLabel}${noLabel === undefined ? "" : `/${noLabel}`}] `,
         yesLabel,
         noLabel,
       );

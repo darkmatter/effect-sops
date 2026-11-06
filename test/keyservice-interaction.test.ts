@@ -4,8 +4,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import type * as Cause from "effect/Cause";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -17,6 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Interaction from "../src/keyservice/interaction.ts";
 import {
   describeRequest,
+  KeyServiceInteractionError,
   sanitizeForDisplay,
   type KeyServiceKey,
   type KeyServiceRequest,
@@ -80,10 +82,15 @@ describe("custom interactions", () => {
   });
 
   test("make converts thrown, rejected, and failed handlers without exposing their details", async () => {
+    const typed = new KeyServiceInteractionError({ reason: "Cancelled", message: "synthetic-sensitive-detail" });
     for (const approve of [
       () => { throw new Error("synthetic-sensitive-detail"); },
       () => Promise.reject(new Error("synthetic-sensitive-detail")),
       () => Effect.fail("synthetic-sensitive-detail"),
+      () => Effect.die("synthetic-sensitive-detail"),
+      () => { throw typed; },
+      () => Promise.reject(typed),
+      () => Effect.die(typed),
     ]) {
       const error = await failure(Interaction.make({ approve }).approve(request()));
       expect(error.reason).toBe("Failed");
@@ -91,7 +98,55 @@ describe("custom interactions", () => {
     }
     await Effect.runPromise(Interaction.make({ waiting: () => Promise.reject("synthetic-sensitive-detail") }).waiting(context));
   });
+
+  test.each(["Cancelled", "TimedOut", "Unavailable"] as const)("make preserves typed %s failures", async (reason) => {
+    const error = new KeyServiceInteractionError({ reason, message: "Interaction unavailable" });
+    const custom = Interaction.make({
+      approve: () => Effect.fail(error),
+      requestValue: () => Effect.fail(error),
+      confirm: () => Effect.fail(error),
+    });
+    expect(await failure(custom.approve(request()))).toBe(error);
+    expect(await failure(custom.requestValue(context, "Value", false))).toBe(error);
+    expect(await failure(custom.confirm(context, "Continue?", "Yes", "No"))).toBe(error);
+  });
+
+  test("make preserves interruption", async () => {
+    const exit = await Effect.runPromiseExit(Interaction.make({ approve: () => Effect.interrupt }).approve(request()));
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+  });
+
+  test("identifies default automatic approval without invoking custom handlers", () => {
+    let calls = 0;
+    expect(Interaction.approvesAutomatically(Interaction.none)).toBe(true);
+    expect(Interaction.approvesAutomatically(Interaction.make({}))).toBe(true);
+    expect(Interaction.approvesAutomatically(Interaction.make({ requestValue: () => "value" }))).toBe(true);
+    expect(Interaction.approvesAutomatically(Interaction.make({ approve: () => { calls++; return true; } }))).toBe(false);
+    expect(calls).toBe(0);
+  });
+
+  test("remembering an automatic approval keeps it detectable", async () => {
+    const remembered = await Effect.runPromise(
+      Interaction.remember(Interaction.none, { ttl: "5 minutes" }),
+    );
+    expect(Interaction.approvesAutomatically(remembered)).toBe(true);
+  });
 });
+
+const promptOrigins: ReadonlyArray<{ label: string; context: PluginPromptContext; suffix: string }> = [
+  {
+    label: "decryption peer host",
+    context: { plugin: "yubikey", request: request({ peerHost: "100.64.1.2\n\u202e" }) },
+    suffix: "\nFor a decryption request from 100.64.1.2??.",
+  },
+  {
+    label: "encryption peer fallback",
+    context: { plugin: "yubikey", request: request({ operation: "encrypt", peerHost: undefined, peer: "unix:/synthetic\u001b\u202e" }) },
+    suffix: "\nFor an encryption request from unix:/synthetic??.",
+  },
+  { label: "no request", context, suffix: "" },
+];
 
 describe("remembered approvals", () => {
   test("approvalCovers compares complete keys and peer hosts, with exact expiry", () => {
@@ -220,6 +275,17 @@ const fakeTerminal = (lines: readonly string[] = [], keys: readonly Terminal.Use
 };
 
 describe("terminal interaction", () => {
+  test.each([...promptOrigins])("plugin prompts include sanitized origin: $label", async ({ context, suffix }) => {
+    const fake = fakeTerminal(["public-value", "yes"]);
+    const terminal = await Effect.runPromise(Interaction.terminal().pipe(Effect.provide(fake.layer)));
+    await Effect.runPromise(terminal.requestValue(context, "Value\nplease\u202e", false));
+    await Effect.runPromise(terminal.confirm(context, "Continue\nnow\u202e", "Yes", "No"));
+    expect(fake.output).toEqual([
+      `[age-plugin-yubikey] Value?please?${suffix} `,
+      `Continue?now?${suffix} [Yes/No] `,
+    ]);
+  });
+
   test("repeats the upstream prompt, accepts yes/no ignoring case, and sanitizes recipients", async () => {
     const fake = fakeTerminal(["maybe", "YES", "nO"]);
     const terminal = await Effect.runPromise(Interaction.terminal().pipe(Effect.provide(fake.layer)));
@@ -343,6 +409,14 @@ const executeJxa = (
 };
 
 describe("dialog interaction", () => {
+  test.each([...promptOrigins])("plugin prompts include sanitized origin: $label", ({ context, suffix }) => withDialog('{"button":"OK","text":"public-value"}', async (log) => {
+    const dialog = await makeDialog();
+    await Effect.runPromise(dialog.requestValue(context, "Value\nplease\u202e", false));
+    expect((await readArguments(log)).payload.message).toBe(`Value?please?${suffix}`);
+    await Effect.runPromise(dialog.confirm(context, "Continue\nnow\u202e", "OK", "Cancel"));
+    expect((await readArguments(log)).payload.message).toBe(`Continue?now?${suffix}`);
+  }));
+
   test("passes hostile recipients only as sanitized JSON data with safe approval defaults", () => withDialog('{"button":"Accept","gaveUp":false}', async (log) => {
     const recipient = 'age1" & do shell script "bad"\n\u202e';
     const incoming = request({ key: { type: "age", recipient } });

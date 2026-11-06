@@ -232,6 +232,11 @@ Resource props accept identity file paths, never identity contents. Use
 `approval: "dialog"` on macOS and `rememberApprovalSeconds` when approval is
 needed. See the [runnable Alchemy example](./examples/keyservice/alchemy.run.ts).
 
+If a `SopsKeyService` remote SSH forward exits, the resource logs a warning and
+closes the whole instance, including local listeners and its other forwards.
+The next Alchemy plan or deploy starts a replacement; it does not restart
+automatically between plans.
+
 ## Without an Alchemy stack
 
 ### Decode an imported JSON document
@@ -369,6 +374,9 @@ await new Promise<void>((resolve) => process.once("SIGINT", resolve));
 When other programs need your age identity, serve the upstream SOPS gRPC API
 from TypeScript. The default is `tcp://127.0.0.1:5000`. The built-in handler
 supports age encryption and decryption, including installed age plugins.
+Unlike upstream SOPS, it does not support SSH age recipients (`ssh-ed25519`
+or `ssh-rsa`) or SSH private-key identity discovery. SSH transport forwards
+are supported independently of those key formats.
 `effect-sops/KeyService` does not import Alchemy or require the `sops` binary.
 
 `startKeyService(options?)` returns a Promise of a handle with `uri`, `uris`,
@@ -376,6 +384,17 @@ supports age encryption and decryption, including installed age plugins.
 block closes its listeners and SSH forwards. For a process that only serves,
 `await runKeyService({ prompt: true })` waits for SIGINT or SIGTERM and cleans
 up; it also accepts an `AbortSignal` as `signal`.
+
+Each remote forward exposes `service.tunnels[i].exited: Promise<void>`, which
+completes when that forward exits or the service closes. A dropped forward
+logs its destination; the standalone service keeps its listeners running and
+does not reconnect automatically.
+
+Choose either `listen` or the `network`, `address`, and `tailscale` shortcuts:
+`startKeyService` rejects combinations of `listen` with any of those shortcuts.
+TCP addresses require an explicit host. Unlike SOPS's `--address :5000`, use
+`address: "127.0.0.1:5000"` for loopback or `address: "0.0.0.0:5000"` for all
+IPv4 interfaces.
 
 The Promise API loads `@effect/platform-bun` on Bun or `@effect/platform-node`
 on Node. Install the matching Effect 4 platform package alongside `effect`.
@@ -401,7 +420,7 @@ BunRuntime.runMain(
 ```
 
 `serve(options?)` returns a scoped Effect with `uri`, `uris`, `addresses`, and
-`tunnels`. `connect(options)` opens a scoped local SSH forward. Closing the
+`tunnels`. `Ssh.localForward(options)` opens a scoped local SSH forward. Closing the
 scope stops its servers and child processes.
 
 | SOPS or SSH command | Promise API | Effect API |
@@ -411,7 +430,7 @@ scope stops its servers and child processes.
 | `--prompt` | `{ prompt: true }` | `{ interaction: yield* Interaction.terminal() }` |
 | No SOPS equivalent: macOS approval and plugin PIN dialogs | `{ dialog: true }` | `{ interaction: yield* Interaction.dialog() }` |
 | `--address "$(tailscale ip -4):5000" --prompt` | `{ tailscale: true, prompt: true }` | `{ listen: Listen.tailscale(5000), interaction: yield* Interaction.terminal() }` |
-| `ssh -L 5000:127.0.0.1:5000 user@host` | `openKeyServiceTunnel({ destination: "user@host", localPort: 5000 })` | `connect({ destination: "user@host", localPort: 5000 })` |
+| `ssh -L 5000:127.0.0.1:5000 user@host` | `openKeyServiceTunnel({ destination: "user@host", localPort: 5000 })` | `Ssh.localForward({ destination: "user@host", localPort: 5000 })` |
 | `ssh -R 5000:127.0.0.1:5000 user@host` | `{ ssh: "user@host" }` | `{ remoteForwards: [{ destination: "user@host" }] }` |
 | `--verbose` | `{ verbose: true }` | Provide `References.MinimumLogLevel` with `"Debug"` |
 
@@ -449,20 +468,27 @@ sops decrypt --enable-local-keyservice=false \
 ```
 
 Requests run one at a time, including approval and plugin interaction. The
-server asks for approval before it encrypts or decrypts a data key or starts a
-plugin; upstream SOPS prompts after doing the key operation. Before asking, it
-loads identities the way SOPS does, including `SOPS_AGE_KEY_CMD`, so it can
-refuse unsupported keys and recipients it has no identity for without a
-prompt. The key command runs once per request, before approval: if it prompts
-(a password manager, for example), that prompt appears first. A plugin can
+`requestTimeout` defaults to five minutes, starting when the request's turn
+begins; queue time does not consume that budget. At most `maxPendingRequests`
+requests wait (default: 16); additional requests fail with `RESOURCE_EXHAUSTED`.
+Client RPC deadlines can still expire while waiting or during approval.
+
+The server asks for approval before it encrypts or decrypts a data key or starts a
+plugin; upstream SOPS prompts after doing the key operation. Preflight may
+read configured identities and files to refuse unsupported keys or known
+missing identities before prompting, but it never runs `SOPS_AGE_KEY_CMD`.
+The key command runs only after approval. A recipient served only by that
+command cannot be refused as missing before the approval prompt; its command
+may then prompt separately, for example to unlock a password manager. A plugin can
 still fail after approval, for example on a wrong PIN or a missing device.
 
 Identity discovery reads `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`,
 `SOPS_AGE_KEY_CMD`, and the platform's SOPS `keys.txt`. Explicit `identities`
 or `identityFiles` disable discovery unless `discover: true` is set. Sources
-are reloaded for each request. For requests that pass preflight, native
-identities are tried before `AGE-PLUGIN-…` identities from `keys.txt`; plugins
-are a fallback during decryption, not a way to bypass recipient preflight.
+are reloaded for each request. Decryption uses only the native identity for
+the approved recipient, or only that recipient's matching plugin group.
+Plugin groups may contain multiple identities; approval does not select an
+individual identity within the matching plugin group.
 `age-plugin-yubikey` PIN requests use the chosen terminal or macOS dialog,
 followed by the hardware touch when required.
 
@@ -471,13 +497,16 @@ with `yield* Interaction.remember(interaction, { ttl: "5 minutes" })` in Effect.
 Approvals are remembered for the same peer host, operation, and complete key.
 Denials are not remembered. Plugin follow-ups, including PINs and touch, are
 never skipped by the approval cache. A peer host is not a user identity:
-clients behind one SSH tunnel share its host for this purpose.
+all `ssh -R` peers appear as `127.0.0.1`. Remembered approvals therefore cover
+every user of the remote host who can reach that forward, as well as local
+clients with the same peer host, operation, and key.
 
 The keyservice protocol has **no authentication or encryption**, just like
 upstream SOPS. Keep listeners on loopback or Unix sockets. Reach them through
 SSH or a Tailscale tailnet with ACLs, and require approval when reachable from
-the network. The server logs a warning when a non-loopback listener uses the
-default interaction without approval. Unix sockets default to mode `0600`.
+the network. The server logs a warning when requests are approved without
+asking and either a non-loopback listener or any SSH remote forward is
+configured. Unix sockets default to mode `0600`.
 
 See [named server configurations and the manual YubiKey check](./examples/keyservice/README.md).
 

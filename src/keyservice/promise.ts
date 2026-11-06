@@ -18,7 +18,8 @@ import type {
   SshLocalForwardOptions,
   SshTunnel,
 } from "./model.js";
-import { connect, serve, type RunningKeyService, type ServeOptions } from "./serve.js";
+import { serve, type RunningKeyService, type ServeOptions } from "./serve.js";
+import * as Ssh from "./ssh.js";
 
 /** A remote SSH forward with an optional target inferred from the server listeners. */
 export type RemoteForwardInput = NonNullable<ServeOptions["remoteForwards"]>[number];
@@ -31,7 +32,7 @@ export interface StartKeyServiceOptions extends Omit<ServeOptions, "listen" | "i
   readonly address?: string;
   /** Listen on this machine's Tailscale IP; true selects IPv4 and port 5000. */
   readonly tailscale?: boolean | { readonly port?: number; readonly family?: 4 | 6 };
-  /** Explicit listeners override network, address, and tailscale. */
+  /** Explicit listeners cannot be combined with network, address, or tailscale. */
   readonly listen?: ListenAddress | ReadonlyArray<ListenAddress>;
   /** Confirm every request on the terminal. */
   readonly prompt?: boolean;
@@ -51,7 +52,10 @@ export interface StartKeyServiceOptions extends Omit<ServeOptions, "listen" | "i
 
 /** A running service whose close and async-dispose operations release all resources. */
 export interface KeyServiceHandle extends Omit<RunningKeyService, "tunnels"> {
-  readonly tunnels: ReadonlyArray<Omit<SshTunnel, "awaitExit">>;
+  /** Each exited promise completes on process exit or service close, without rejecting. */
+  readonly tunnels: ReadonlyArray<
+    Omit<SshTunnel, "awaitExit"> & { readonly exited: Promise<void> }
+  >;
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
 }
@@ -108,6 +112,13 @@ const start = async (
   signal?: AbortSignal,
 ): Promise<KeyServiceHandle> => {
   if (
+    options.listen !== undefined &&
+    (options.network !== undefined ||
+      options.address !== undefined ||
+      options.tailscale !== undefined)
+  )
+    throw new Error("Choose listen or network, address, and tailscale");
+  if (
     (options.prompt && options.dialog) ||
     (options.interaction && (options.prompt || options.dialog))
   )
@@ -133,7 +144,13 @@ const start = async (
                   typeof options.dialog === "object" ? options.dialog : undefined,
                 )
               : Interaction.none;
-    if (options.rememberApproval !== undefined && interaction !== Interaction.none)
+    // Adapting an existing interaction must not disguise the default approval policy.
+    if (options.interaction?.approve === Interaction.none.approve)
+      interaction = { ...interaction, approve: Interaction.none.approve };
+    if (
+      options.rememberApproval !== undefined &&
+      !Interaction.approvesAutomatically(interaction)
+    )
       interaction = yield* Interaction.remember(interaction, { ttl: options.rememberApproval });
     const forwards =
       options.ssh === undefined
@@ -153,14 +170,17 @@ const start = async (
       ],
     });
   });
-  const { value, close } = await acquire(
+  const { value, runtime, close } = await acquire(
     options.layer ?? platformLayer,
     options.verbose ? Effect.provideService(program, References.MinimumLogLevel, "Debug") : program,
     signal,
   );
   return {
     ...value,
-    tunnels: value.tunnels.map(({ awaitExit: _awaitExit, ...tunnel }) => tunnel),
+    tunnels: value.tunnels.map(({ awaitExit, ...tunnel }) => ({
+      ...tunnel,
+      exited: runtime.runPromiseExit(awaitExit).then(() => undefined, () => undefined),
+    })),
     close,
     [Symbol.asyncDispose]: close,
   };
@@ -202,13 +222,16 @@ export const runKeyService = async (
 export const openKeyServiceTunnel = async (
   options: SshLocalForwardOptions & { readonly layer?: Layer.Layer<ChildProcessSpawner> },
 ): Promise<KeyServiceTunnelHandle> => {
-  const { value, runtime, close } = await acquire(options.layer ?? platformLayer, connect(options));
+  const { value, runtime, close } = await acquire(
+    options.layer ?? platformLayer,
+    Ssh.localForward(options),
+  );
   return {
     uri: value.uri,
     bindHost: value.bindHost,
     bindPort: value.bindPort,
     destination: value.destination,
-    exited: runtime.runPromise(value.awaitExit),
+    exited: runtime.runPromiseExit(value.awaitExit).then(() => undefined, () => undefined),
     close,
     [Symbol.asyncDispose]: close,
   };

@@ -719,7 +719,10 @@ const hashLoadedSource = (
             secrets: props.secrets,
             schemaKey: props.schemaKey,
             providerVersion: PROVIDER_VERSION,
-            keyService: keyServiceSettings(buildSopsCommandRequest({ source: {}, options: props })),
+            // Transport endpoints can change without changing decrypted content.
+            enableLocalKeyService: keyServiceSettings(
+              buildSopsCommandRequest({ source: {}, options: props }),
+            ).enableLocalKeyService,
             types: props.types,
           }),
         ),
@@ -861,7 +864,12 @@ const bytesToHex = (bytes: Uint8Array): string =>
 const sameProps = (
   olds: SopsFileProps | undefined,
   news: SopsFileProps,
-): boolean => JSON.stringify(olds ?? {}) === JSON.stringify(news);
+): boolean => {
+  // Ephemeral keyservice ports must not trigger a new decryption or approval.
+  const { keyServices: _oldUris, ...oldProps } = olds ?? {};
+  const { keyServices: _newUris, ...newProps } = news;
+  return JSON.stringify(oldProps) === JSON.stringify(newProps);
+};
 
 const normalizeGeneratedTypes = (
   options: SopsGeneratedTypesInput,

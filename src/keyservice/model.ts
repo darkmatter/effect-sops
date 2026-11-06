@@ -188,6 +188,8 @@ export interface AgeKeyServiceOptions {
    * Discover identities the way `sops` does, on every request:
    * `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`, `SOPS_AGE_KEY_CMD`, then the user
    * `sops/age/keys.txt` (`$XDG_CONFIG_HOME` first on macOS).
+   * `SOPS_AGE_KEY_CMD` may prompt (a password manager, for example), so the
+   * keyservice runs it only after a request is approved.
    * Default: `true` unless `identities` or `identityFiles` is set.
    */
   readonly discover?: boolean;
@@ -196,7 +198,8 @@ export interface AgeKeyServiceOptions {
   /**
    * Plugins that may be spawned for Encrypt requests to plugin recipients
    * (`age1<name>1…`). Recipients come from the network, so this is an
-   * allowlist. Default: the plugins named by the loaded identities.
+   * allowlist. Default: the plugins named by identities from explicit
+   * values, identity files, `SOPS_AGE_KEY`, and `keys.txt`.
    */
   readonly encryptPlugins?: ReadonlyArray<string>;
   /** Resolve a plugin name to its executable. Default: `age-plugin-<name>` on `PATH`. */
@@ -289,8 +292,18 @@ export interface KeyServiceServerOptions {
   }>;
   readonly keys: KeyHandler;
   readonly interaction: KeyServiceInteraction;
-  /** Upper bound for one request, including approval and plugin interaction. Default: 2 minutes. */
+  /**
+   * Upper bound for serving one request once it is its turn, covering
+   * approval, PIN entry, and hardware touch. Time spent queued behind other
+   * requests does not count. Default: 5 minutes.
+   */
   readonly requestTimeout?: Duration.Input;
+  /**
+   * Requests allowed to wait for their turn. Further requests are refused
+   * with `RESOURCE_EXHAUSTED` so a flood cannot queue unbounded prompts.
+   * Default: 16.
+   */
+  readonly maxPendingRequests?: number;
   /** Log request metadata (never key material). Default: `true`. */
   readonly logRequests?: boolean;
   /** File mode applied to Unix sockets after binding. Default: `0o600`. */

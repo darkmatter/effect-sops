@@ -2,7 +2,6 @@
 import * as net from "node:net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import * as Stream from "effect/Stream";
@@ -90,7 +89,7 @@ function validate(
     );
 }
 
-/** Build `-L` arguments, preserving first-value precedence for user SSH options. Throws InvalidOptions for invalid inputs. */
+/** Build verbose `-L` arguments, preserving first-value precedence for user SSH options. Throws InvalidOptions for invalid inputs. */
 export const localForwardArgs = (
   options: SshLocalForwardOptions,
   localPort: number,
@@ -106,6 +105,7 @@ export const localForwardArgs = (
   return [
     ...(options.sshArgs ?? []),
     ...defaults,
+    "-v",
     "-L",
     `${hostPort(host, localPort)}:${hostPort(remoteHost, remotePort)}`,
     "--",
@@ -148,17 +148,23 @@ export const remoteForwardArgs = (
   ];
 };
 
-const freePort = (host: string, options: SshCommonOptions) =>
+const freePort = (host: string, port: number, options: SshCommonOptions) =>
   Effect.callback<number, SshTunnelError>((resume, signal) => {
     const server = net.createServer();
-    server.once("error", () =>
+    server.once("error", (cause: NodeJS.ErrnoException) =>
       resume(
         Effect.fail(
-          error(options, "ForwardFailed", "Could not reserve a local SSH port"),
+          error(
+            options,
+            "ForwardFailed",
+            port !== 0 && cause.code === "EADDRINUSE"
+              ? `local port ${port} is already in use`
+              : "Could not reserve a local SSH port",
+          ),
         ),
       ),
     );
-    server.listen({ port: 0, host, signal }, () => {
+    server.listen({ port, host, signal }, () => {
       if (signal.aborted) {
         server.close();
         return;
@@ -181,22 +187,6 @@ const freePort = (host: string, options: SshCommonOptions) =>
     });
     return Effect.sync(() => {
       server.close();
-    });
-  });
-
-const connect = (host: string, port: number) =>
-  Effect.callback<void, "NotReady">((resume) => {
-    const socket = net.createConnection({ host, port });
-    socket.once("connect", () => {
-      socket.destroy();
-      resume(Effect.void);
-    });
-    socket.once("error", () => {
-      socket.destroy();
-      resume(Effect.fail("NotReady"));
-    });
-    return Effect.sync(() => {
-      socket.destroy();
     });
   });
 
@@ -230,6 +220,22 @@ const spawnForward = Effect.fn("Ssh.spawnForward")(function* (
   let succeeded = false;
   const line = (value: string) =>
     Effect.gen(function* () {
+      if (direction === "local") {
+        if (
+          /Could not request local forwarding|cannot listen to port|Address already in use/i.test(
+            value,
+          )
+        )
+          yield* Deferred.fail(
+            ready,
+            error(options, "ForwardFailed", "SSH local forwarding failed", tail),
+          );
+        // OpenSSH prints its listening message before bind succeeds; session
+        // entry follows successful forwarding setup.
+        else if (value.includes("Entering interactive session"))
+          yield* Deferred.succeed(ready, port);
+        return;
+      }
       if (
         /remote forward failure for: listen|Warning: remote port forwarding failed/i.test(
           value,
@@ -256,7 +262,6 @@ const spawnForward = Effect.fn("Ssh.spawnForward")(function* (
     Stream.runForEach((chunk) =>
       Effect.gen(function* () {
         tail = (tail + chunk).slice(-tailLimit);
-        if (direction !== "remote") return;
         const lines = (pending + chunk).split("\n");
         pending = (lines.pop() ?? "").slice(-tailLimit);
         for (const value of lines) yield* line(value);
@@ -279,21 +284,7 @@ const spawnForward = Effect.fn("Ssh.spawnForward")(function* (
       error(options, "Exited", "SSH exited before the forward was ready", tail),
     );
   });
-  const readiness =
-    direction === "remote"
-      ? Deferred.await(ready)
-      : connect(host, port).pipe(
-          Effect.retry(Schedule.spaced("100 millis")),
-          Effect.as(port),
-          Effect.mapError(() =>
-            error(
-              options,
-              "ForwardFailed",
-              "Could not connect to the SSH listener",
-            ),
-          ),
-        );
-  const bindPort = yield* Effect.raceFirst(readiness, exited).pipe(
+  const bindPort = yield* Effect.raceFirst(Deferred.await(ready), exited).pipe(
     Effect.timeoutOrElse({
       duration: options.readyTimeout ?? "15 seconds",
       orElse: () =>
@@ -348,9 +339,7 @@ export const localForward: (
         : error(options, "InvalidOptions", "Invalid local SSH options"),
   });
   const host = options.localHost ?? "127.0.0.1";
-  const port = options.localPort
-    ? options.localPort
-    : yield* freePort(host, options);
+  const port = yield* freePort(host, options.localPort ?? 0, options);
   return yield* start(
     options,
     localForwardArgs(options, port),

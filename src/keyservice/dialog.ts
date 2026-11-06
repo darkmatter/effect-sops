@@ -100,6 +100,13 @@ const timeoutSeconds = (duration: Duration.Input): number => {
   return Math.ceil(seconds);
 };
 
+const pluginPrompt = ({ request }: PluginPromptContext, prompt: string): string => {
+  const safePrompt = sanitizeForDisplay(prompt, 400);
+  if (request === undefined) return safePrompt;
+  const peer = sanitizeForDisplay(request.peerHost ?? request.peer, 80);
+  return `${safePrompt}\nFor ${request.operation === "decrypt" ? "a decryption" : "an encryption"} request from ${peer}.`;
+};
+
 /** Capture the spawner and create scoped macOS approval and plugin dialogs. */
 export const dialog: (
   options?: DialogOptions,
@@ -214,7 +221,7 @@ export const dialog: (
       const result = yield* run({
         kind: "value",
         title: pluginTitle(context),
-        message: sanitizeForDisplay(prompt, 400),
+        message: pluginPrompt(context, prompt),
         hidden: secret,
         defaultAnswer: "",
         buttons: ["Cancel", "OK"],
@@ -255,7 +262,7 @@ export const dialog: (
       const result = yield* run({
         kind: "confirm",
         title: pluginTitle(context),
-        message: sanitizeForDisplay(prompt, 400),
+        message: pluginPrompt(context, prompt),
         buttons: [noLabel, yesLabel],
         defaultButton: yesLabel,
         cancelButton: noLabel,

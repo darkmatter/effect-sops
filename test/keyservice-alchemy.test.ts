@@ -1,10 +1,11 @@
-import { expect } from "bun:test";
+import { expect, test as bunTest } from "bun:test";
 import * as net from "node:net";
 import * as Output from "alchemy/Output";
 import * as Test from "alchemy/Test/Bun";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
@@ -14,11 +15,17 @@ import {
   keyServiceProviders,
   SopsKeyService,
   SopsKeyServiceTunnel,
+  type SopsKeyServiceProps,
 } from "../src/keyservice/alchemy.ts";
 import * as Listen from "../src/keyservice/listen.ts";
 import { SopsFile, SopsFileProvider } from "../src/resource.ts";
 import { runSopsAge } from "../src/sops-age.ts";
 import encrypted from "./fixtures/native.enc.json" with { type: "json" };
+
+bunTest("the sidecar entry default-exports a Layer", async () => {
+  const entry = await import("../src/keyservice/alchemy-local.ts");
+  expect(Layer.isLayer(entry.default)).toBe(true);
+});
 
 const { test } = Test.make({
   providers: Layer.mergeAll(keyServiceProviders(), SopsFileProvider()),
@@ -84,9 +91,14 @@ const awaitRefused = (uri: string) =>
 test.provider("keyservice decrypts, preserves a noop, updates, and closes on destroy", (stack) =>
   Effect.gen(function* () {
     const { props } = yield* fixture;
-    const program = SopsKeyService("KeyService", props);
+    // Both ports are occupied before update, so the replacement cannot reuse the old URI.
+    const program = SopsKeyService("KeyService", {
+      ...props,
+      listen: [Listen.loopback(0), Listen.loopback(0)],
+    });
     const created = yield* stack.deploy(program);
-    expect(created.uris).toEqual([created.uri]);
+    expect(created.uris).toHaveLength(2);
+    expect(created.uris[0]).toBe(created.uri);
     expect(created.remoteUris).toEqual([]);
     expect(JSON.parse(yield* decrypt(created.uri)).api.token).toBe("native-token");
 
@@ -95,12 +107,14 @@ test.provider("keyservice decrypts, preserves a noop, updates, and closes on des
     expect(yield* connectionStatus(unchanged.uri)).toBe("connected");
 
     const updated = yield* stack.deploy(
-      SopsKeyService("KeyService", { ...props, requestTimeoutSeconds: 10 }),
+      SopsKeyService("KeyService", {
+        ...props,
+        listen: [Listen.loopback(Number(new URL(created.uris[1]!).port))],
+        requestTimeoutSeconds: 10,
+      }),
     );
     expect(JSON.parse(yield* decrypt(updated.uri)).api.token).toBe("native-token");
-    if (updated.uri !== created.uri) {
-      expect(yield* awaitRefused(created.uri)).toBe("refused");
-    }
+    expect(yield* awaitRefused(created.uri)).toBe("refused");
 
     yield* stack.destroy();
     expect(yield* awaitRefused(updated.uri)).toBe("refused");
@@ -203,8 +217,16 @@ test.provider("keyservice example deploys and destroys using its explicit fixtur
   }),
 );
 
-test.provider("a dead remote forward closes its keyservice instance before replacement", (stack) =>
-  Effect.gen(function* () {
+test.provider("a dead remote forward closes its keyservice instance before replacement", (stack) => {
+  let warningCount = 0;
+  const logger = Logger.make(({ logLevel, message }) => {
+    if (
+      logLevel === "Warn" && Array.isArray(message) &&
+      message.some((value: unknown) =>
+        typeof value === "string" && value.includes("SSH forward exited"))
+    ) warningCount += 1;
+  });
+  return Effect.gen(function* () {
     const { props, ssh, pidFile, fs } = yield* fixture;
     const program = SopsKeyService("KeyService", {
       ...props,
@@ -224,6 +246,7 @@ test.provider("a dead remote forward closes its keyservice instance before repla
     yield* Effect.sync(() => process.kill(originalPid, "SIGTERM"));
     expect(yield* awaitRefused(created.remoteUris[0]!)).toBe("refused");
     expect(yield* awaitRefused(created.uri)).toBe("refused");
+    expect(warningCount).toBe(1);
 
     const restarted = yield* Effect.gen(function* () {
       const deployed = yield* stack.deploy(program);
@@ -241,6 +264,61 @@ test.provider("a dead remote forward closes its keyservice instance before repla
     expect(yield* awaitRefused(restarted.deployed.uri)).toBe("refused");
     expect(yield* awaitRefused(restarted.deployed.remoteUris[0]!)).toBe("refused");
     expect(() => process.kill(restarted.pid, 0)).toThrow();
-  }),
+    expect(warningCount).toBe(1);
+  }).pipe(Effect.provide(Logger.layer([logger])));
+},
   { timeout: 30_000 },
+);
+
+for (const [name, options] of [
+  ["dialog without approval", { dialog: {} }],
+  ["remember without approval", { rememberApprovalSeconds: 60 }],
+  ["dialog with approval none", { approval: "none", dialog: {} }],
+  ["remember with approval none", { approval: "none", rememberApprovalSeconds: 60 }],
+] satisfies ReadonlyArray<readonly [string, SopsKeyServiceProps]>) {
+  test.provider(`rejects ${name}`, (stack) => Effect.gen(function* () {
+    const { props } = yield* fixture;
+    const result = yield* stack.deploy(SopsKeyService("KeyService", { ...props, ...options })).pipe(
+      Effect.match({
+        onFailure: (error) => ({ failed: true, message: error instanceof Error ? error.message : "" }),
+        onSuccess: () => ({ failed: false, message: "" }),
+      }),
+    );
+    yield* stack.destroy();
+    expect(result.failed).toBe(true);
+    expect(result.message).toContain('require approval: "dialog"');
+  }));
+}
+
+let cacheDecryptCalls = 0;
+const { test: cacheTest } = Test.make({
+  providers: SopsFileProvider({
+    decrypt: () => Effect.sync(() => {
+      cacheDecryptCalls += 1;
+      return '{"fixture":"value"}';
+    }),
+  }),
+});
+
+cacheTest.provider("SopsFile ignores URI changes but preserves local-keyservice policy", (stack) =>
+  Effect.gen(function* () {
+    const program = (uri: string, enableLocalKeyService = false) => SopsFile("Secrets", {
+      content: JSON.stringify(encrypted),
+      format: "json",
+      keyServices: [uri],
+      enableLocalKeyService,
+    });
+    const before = cacheDecryptCalls;
+    const created = yield* stack.deploy(program("tcp://127.0.0.1:5001"));
+    const next = program("tcp://127.0.0.1:5002");
+    const plan = yield* stack.plan(next);
+    const updated = yield* stack.deploy(next);
+    expect(cacheDecryptCalls - before).toBe(1);
+    expect(updated.sourceHash).toBe(created.sourceHash);
+    expect(Object.values(plan.resources).map((resource) => resource.action)).toEqual(["noop"]);
+    const changed = yield* stack.deploy(program("tcp://127.0.0.1:5002", true));
+    expect(cacheDecryptCalls - before).toBe(2);
+    expect(changed.sourceHash).not.toBe(created.sourceHash);
+    yield* stack.destroy();
+  }),
 );

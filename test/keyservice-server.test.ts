@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
-import { Client, credentials, status, type MethodDefinition } from "@grpc/grpc-js";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Client, credentials, Server, status, type MethodDefinition } from "@grpc/grpc-js";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { armor, Decrypter } from "age-encryption";
+import { lstatSync, symlinkSync, unlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -159,8 +160,8 @@ describe("keyservice server requests", () => {
             Date.now() + 2_000,
           ),
         );
-        expect(actual).toEqual(plaintext());
-        expect(output).toEqual(new Uint8Array(32));
+        expect(actual.every((byte) => byte === 42) && actual.length === 32).toBe(true);
+        expect(output.every((byte) => byte === 0) && output.length === 32).toBe(true);
         expect(seen[0]).toMatchObject({
           id: 1,
           operation: "decrypt",
@@ -218,10 +219,19 @@ describe("keyservice server requests", () => {
         });
         await expect(
           rpc(uri, keyServiceDefinition.Encrypt, { plaintext: plaintext() }),
-        ).rejects.toMatchObject({ code: status.NOT_FOUND, details: "Must provide a key" });
+        ).rejects.toMatchObject({
+          code: status.NOT_FOUND,
+          details: "Must provide a key",
+        });
         await expect(
           rpc(uri, keyServiceDefinition.Decrypt, {
-            key: { type: "kms", arn: "test-arn", role: "", context: {}, awsProfile: "" },
+            key: {
+              type: "kms",
+              arn: "test-arn",
+              role: "",
+              context: {},
+              awsProfile: "",
+            },
             ciphertext,
           }),
         ).rejects.toMatchObject({ code: status.UNIMPLEMENTED });
@@ -252,7 +262,10 @@ describe("keyservice server requests", () => {
   test.each(statuses)("maps handler failure %s to gRPC %s", async (reason, code) => {
     await withServer(
       async (uri) => {
-        await expect(decrypt(uri)).rejects.toMatchObject({ code, details: "Client-safe failure" });
+        await expect(decrypt(uri)).rejects.toMatchObject({
+          code,
+          details: "Client-safe failure",
+        });
       },
       {
         keys: {
@@ -279,7 +292,12 @@ describe("keyservice server requests", () => {
       },
       {
         interaction: interaction(() =>
-          Effect.fail(new KeyServiceInteractionError({ reason, message: "Approval unavailable" })),
+          Effect.fail(
+            new KeyServiceInteractionError({
+              reason,
+              message: "Approval unavailable",
+            }),
+          ),
         ),
       },
     );
@@ -293,7 +311,12 @@ describe("keyservice server requests", () => {
           details: "internal keyservice error",
         });
       },
-      { keys: { ...keys, decrypt: () => Effect.die(new Error("fixture defect")) } },
+      {
+        keys: {
+          ...keys,
+          decrypt: () => Effect.die(new Error("fixture defect")),
+        },
+      },
     );
   });
 
@@ -339,7 +362,12 @@ describe("keyservice server requests", () => {
           details: "internal keyservice error",
         });
       },
-      { keys: { ...keys, decrypt: () => Effect.die(new Error("private-defect-sentinel")) } },
+      {
+        keys: {
+          ...keys,
+          decrypt: () => Effect.die(new Error("private-defect-sentinel")),
+        },
+      },
       Logger.make<unknown, void>(({ message, cause }) => {
         logs.push({ message, cause });
       }),
@@ -358,9 +386,12 @@ describe("keyservice server requests", () => {
             key: age,
             plaintext: plaintext(),
           });
-          if (fail) await expect(pending).rejects.toMatchObject({ code: status.ABORTED });
+          if (fail)
+            await expect(pending).rejects.toMatchObject({
+              code: status.ABORTED,
+            });
           else expect((await pending).ciphertext).toEqual(ciphertext);
-          expect(received).toEqual(new Uint8Array(32));
+          expect(received?.every((byte) => byte === 0) && received.length === 32).toBe(true);
         },
         {
           keys: {
@@ -368,11 +399,14 @@ describe("keyservice server requests", () => {
             encrypt: (input) =>
               Effect.gen(function* () {
                 received = input.plaintext;
-                expect(received).toEqual(plaintext());
+                expect(received.every((byte) => byte === 42) && received.length === 32).toBe(true);
                 expect(input.request.operation).toBe("encrypt");
                 return fail
                   ? yield* Effect.fail(
-                      new KeyServiceError({ reason: "PluginFailed", message: "Fixture failure" }),
+                      new KeyServiceError({
+                        reason: "PluginFailed",
+                        message: "Fixture failure",
+                      }),
                     )
                   : ciphertext;
               }),
@@ -388,7 +422,10 @@ describe("keyservice server requests", () => {
       async (uri) => {
         await Promise.all([
           decrypt(uri),
-          rpc(uri, keyServiceDefinition.Encrypt, { key: age, plaintext: plaintext() }),
+          rpc(uri, keyServiceDefinition.Encrypt, {
+            key: age,
+            plaintext: plaintext(),
+          }),
         ]);
         expect(events).toEqual([
           "preflight",
@@ -443,11 +480,14 @@ describe("keyservice server requests", () => {
     await withServer(
       async (uri) => {
         const pending = decrypt(uri, 150);
-        const failure = expect(pending).rejects.toMatchObject({ code: status.DEADLINE_EXCEEDED });
+        const failure = expect(pending).rejects.toMatchObject({
+          code: status.DEADLINE_EXCEEDED,
+        });
         await entered.promise;
         await failure;
         await interrupted.promise;
-        expect((await decrypt(uri)).plaintext).toEqual(plaintext());
+        const result = (await decrypt(uri)).plaintext;
+        expect(result.length === 32 && result.every((byte) => byte === 42)).toBe(true);
       },
       {
         interaction: interaction(() =>
@@ -466,7 +506,9 @@ describe("keyservice server requests", () => {
     const interrupted = signal();
     await withServer(
       async (uri) => {
-        await expect(decrypt(uri)).rejects.toMatchObject({ code: status.DEADLINE_EXCEEDED });
+        await expect(decrypt(uri)).rejects.toMatchObject({
+          code: status.DEADLINE_EXCEEDED,
+        });
         await interrupted.promise;
       },
       {
@@ -478,34 +520,125 @@ describe("keyservice server requests", () => {
     );
   });
 
-  test("request timeout includes waiting for the server-wide permit", async () => {
+  test("request timeout excludes queue wait, including interruption cleanup", async () => {
     const entered = signal();
     let count = 0;
     await withServer(
       async (uri) => {
-        const first = decrypt(uri);
+        const first = decrypt(uri).then(
+          () => -1,
+          (error: { code: number }) => error.code,
+        );
         await entered.promise;
-        const second = decrypt(uri);
-        const startTime = Date.now();
-        const [firstResult, secondResult] = await Promise.allSettled([first, second]);
-        expect(firstResult.status).toBe("fulfilled");
-        expect(secondResult.status).toBe("rejected");
-        if (secondResult.status === "rejected")
-          expect(secondResult.reason).toMatchObject({
-            code: status.DEADLINE_EXCEEDED,
-            details: "Keyservice request timed out",
-          });
-        expect(Date.now() - startTime).toBeLessThan(300);
+        const started = Date.now();
+        const second = await decrypt(uri);
+        expect(second.plaintext.length).toBe(32);
+        expect(Date.now() - started).toBeGreaterThan(200);
+        expect(await first).toBe(status.DEADLINE_EXCEEDED);
       },
       {
-        requestTimeout: "200 millis",
+        requestTimeout: "100 millis",
+        interaction: interaction(() =>
+          ++count === 1
+            ? Effect.gen(function* () {
+                entered.resolve();
+                return yield* Effect.never;
+              }).pipe(Effect.onInterrupt(() => Effect.sleep("250 millis")))
+            : Effect.succeed(true),
+        ),
+      },
+    );
+  });
+
+  test.each([0, 2, undefined])("refuses requests beyond the pending cap %s", async (limit) => {
+    const entered = signal(),
+      release = signal();
+    let approvals = 0;
+    await withServer(
+      async (uri) => {
+        const client = new Client(keyServiceTarget(uri), credentials.createInsecure());
+        const request = () =>
+          new Promise<number>((resolve, reject) => {
+            const method = keyServiceDefinition.Decrypt;
+            client.makeUnaryRequest(
+              method.path,
+              method.requestSerialize,
+              method.responseDeserialize,
+              { key: age, ciphertext },
+              { deadline: Date.now() + 2_000 },
+              (error, response) => {
+                if (error) reject(error);
+                else resolve(response?.plaintext.length ?? 0);
+              },
+            );
+          });
+        const pending = [request()];
+        try {
+          await entered.promise;
+          for (let index = 0; index < (limit ?? 16); index++) pending.push(request());
+          // Let the queued RPCs reach the listener before testing overflow.
+          await Bun.sleep(60);
+          const started = Date.now();
+          await expect(request()).rejects.toMatchObject({
+            code: status.RESOURCE_EXHAUSTED,
+            details: "keyservice is busy",
+          });
+          expect(Date.now() - started).toBeLessThan(400);
+          expect(approvals).toBe(1);
+        } finally {
+          release.resolve();
+          try {
+            await Promise.all(pending);
+          } finally {
+            client.close();
+          }
+        }
+      },
+      {
+        ...(limit === undefined ? {} : { maxPendingRequests: limit }),
         interaction: interaction(() =>
           Effect.gen(function* () {
-            count++;
-            if (count === 1) {
-              entered.resolve();
-              yield* Effect.sleep("140 millis");
-            } else yield* Effect.never;
+            approvals++;
+            entered.resolve();
+            yield* Effect.promise(() => release.promise);
+            return true;
+          }),
+        ),
+      },
+    );
+  });
+
+  test("cancelling a queued request reclaims its admission slot", async () => {
+    const entered = signal(),
+      release = signal();
+    let approvals = 0;
+    await withServer(
+      async (uri) => {
+        const first = decrypt(uri);
+        try {
+          await entered.promise;
+          await expect(decrypt(uri, 100)).rejects.toMatchObject({
+            code: status.DEADLINE_EXCEEDED,
+          });
+          await Bun.sleep(30);
+          const replacement = decrypt(uri);
+          await Bun.sleep(30);
+          expect(approvals).toBe(1);
+          release.resolve();
+          expect((await replacement).plaintext.length).toBe(32);
+        } finally {
+          release.resolve();
+          await first;
+        }
+        expect(approvals).toBe(2);
+      },
+      {
+        maxPendingRequests: 1,
+        interaction: interaction(() =>
+          Effect.gen(function* () {
+            approvals++;
+            entered.resolve();
+            yield* Effect.promise(() => release.promise);
             return true;
           }),
         ),
@@ -540,7 +673,10 @@ describe("keyservice server requests", () => {
     if (address._tag !== "Tcp") throw new Error("Expected TCP listener");
     await expect(
       new Promise<void>((resolve, reject) => {
-        const socket = createConnection({ host: address.host, port: address.port });
+        const socket = createConnection({
+          host: address.host,
+          port: address.port,
+        });
         socket.once("error", reject);
         socket.once("connect", () => {
           socket.destroy();
@@ -552,15 +688,149 @@ describe("keyservice server requests", () => {
 });
 
 describe("keyservice server listeners", () => {
+  test("concurrent Unix binds are owner-only at the callback and restore the umask", async () => {
+    await temporary(async (directory) => {
+      const originalBind = Server.prototype.bindAsync;
+      const observed: Array<{ mode: number; mask: number }> = [];
+      let binding = 0,
+        peakBinding = 0;
+      const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(function (
+        this: Server,
+        address,
+        credentials,
+        callback,
+      ) {
+        binding++;
+        peakBinding = Math.max(peakBinding, binding);
+        originalBind.call(this, address, credentials, (error, port) => {
+          observed.push({
+            mode: lstatSync(address.slice(5)).mode & 0o777,
+            mask: process.umask(),
+          });
+          setTimeout(() => {
+            binding--;
+            callback(error, port);
+          }, 30);
+        });
+      });
+      const previous = process.umask(0);
+      const results = await Promise.allSettled(
+        ["first", "second"].map((name) =>
+          start({
+            addresses: addresses({
+              _tag: "Unix",
+              path: join(directory, `${name}.sock`),
+            }),
+            socketMode: 0o660,
+          }),
+        ),
+      );
+      try {
+        expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+        expect(observed).toEqual([
+          { mode: 0o600, mask: 0o177 },
+          { mode: 0o600, mask: 0o177 },
+        ]);
+        expect(peakBinding).toBe(1);
+        expect(process.umask()).toBe(0);
+      } finally {
+        bind.mockRestore();
+        process.umask(previous);
+        for (const result of results) if (result.status === "fulfilled") await result.value.close();
+      }
+    });
+  });
+
+  test("rejects a replaced Unix socket without chmodding its symlink target", async () => {
+    await temporary(async (directory) => {
+      const first = join(directory, "first.sock"),
+        replaced = join(directory, "replaced.sock"),
+        target = join(directory, "target");
+      await writeFile(target, "keep", { mode: 0o644 });
+      const targetMode = (await stat(target)).mode;
+      const originalBind = Server.prototype.bindAsync;
+      const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(function (
+        this: Server,
+        address,
+        credentials,
+        callback,
+      ) {
+        originalBind.call(this, address, credentials, (error, port) => {
+          if (!error && address === `unix://${replaced}`) {
+            unlinkSync(replaced);
+            symlinkSync(target, replaced);
+          }
+          callback(error, port);
+        });
+      });
+      try {
+        await expect(
+          withServer(
+            async () => {
+              throw new Error("Unexpected bind success");
+            },
+            {
+              addresses: addresses({ _tag: "Unix", path: first }, { _tag: "Unix", path: replaced }),
+            },
+          ),
+        ).rejects.toMatchObject({ reason: "BindFailed" });
+        expect((await stat(target)).mode).toBe(targetMode);
+        expect(await readFile(target, "utf8")).toBe("keep");
+        await expect(stat(first)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(decrypt(`unix://${first}`, 100)).rejects.toMatchObject({
+          code: status.UNAVAILABLE,
+        });
+      } finally {
+        bind.mockRestore();
+      }
+    });
+  });
+
+  test.each(["throw", "callback"])(
+    "restores the Unix bind umask on %s failure",
+    async (failure) => {
+      await temporary(async (directory) => {
+        let bindingMask = -1;
+        const bind = spyOn(Server.prototype, "bindAsync").mockImplementation(
+          (_address, _credentials, callback) => {
+            bindingMask = process.umask();
+            const error = new Error("Fixture bind failure");
+            if (failure === "throw") throw error;
+            callback(error, 0);
+          },
+        );
+        const previous = process.umask(0o022);
+        try {
+          await expect(
+            start({
+              addresses: addresses({
+                _tag: "Unix",
+                path: join(directory, "failed.sock"),
+              }),
+            }),
+          ).rejects.toMatchObject({ reason: "BindFailed" });
+          expect(bindingMask).toBe(0o177);
+          expect(process.umask()).toBe(0o022);
+        } finally {
+          bind.mockRestore();
+          process.umask(previous);
+        }
+      });
+    },
+  );
+
   test("binds every TCP address and reports real ephemeral ports", async () => {
-    const server = await start({ addresses: addresses(tcp, { ...tcp, host: "localhost" }) });
+    const server = await start({
+      addresses: addresses(tcp, { ...tcp, host: "localhost" }),
+    });
     try {
       expect(server.addresses).toHaveLength(2);
       for (const bound of server.addresses) {
         expect(bound.requested).toMatchObject({ port: 0 });
         expect(bound.address._tag).toBe("Tcp");
         if (bound.address._tag === "Tcp") expect(bound.address.port).toBeGreaterThan(0);
-        expect((await decrypt(bound.uri)).plaintext).toEqual(plaintext());
+        const result = (await decrypt(bound.uri)).plaintext;
+        expect(result.length === 32 && result.every((byte) => byte === 42)).toBe(true);
       }
     } finally {
       await server.close();
@@ -580,12 +850,15 @@ describe("keyservice server listeners", () => {
         try {
           expect(uri).toBe(`unix://${path}`);
           expect((await stat(path)).mode & 0o777).toBe(mode);
-          expect((await decrypt(uri)).plaintext).toEqual(plaintext());
+          const result = (await decrypt(uri)).plaintext;
+          expect(result.length === 32 && result.every((byte) => byte === 42)).toBe(true);
         } finally {
           await server.close();
         }
         await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
-        await expect(decrypt(uri, 100)).rejects.toMatchObject({ code: status.UNAVAILABLE });
+        await expect(decrypt(uri, 100)).rejects.toMatchObject({
+          code: status.UNAVAILABLE,
+        });
       });
     },
   );
@@ -663,7 +936,8 @@ describe("keyservice server listeners", () => {
       expect((await stat(path)).isSocket()).toBe(true);
       await withServer(
         async (uri) => {
-          expect((await decrypt(uri)).plaintext).toEqual(plaintext());
+          const result = (await decrypt(uri)).plaintext;
+          expect(result.length === 32 && result.every((byte) => byte === 42)).toBe(true);
         },
         { addresses: addresses({ _tag: "Unix", path }) },
       );

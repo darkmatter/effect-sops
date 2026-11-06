@@ -178,6 +178,9 @@ type ExchangeInput =
       readonly fileKey: Uint8Array;
     };
 
+// One generator runs both protocol phases so the order of stanzas, replies,
+// interaction failures, and secret cleanup reads top to bottom; splitting the
+// phase-2 loop by stanza type would scatter that shared per-exchange state.
 const exchange = Effect.fn("AgePlugin.exchange")(function* (
   plugin: string,
   input: ExchangeInput,

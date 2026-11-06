@@ -46,14 +46,20 @@ export interface SopsKeyServiceAttributes {
   readonly remoteUris: ReadonlyArray<string>;
 }
 
-/** A scoped local keyservice, hosted in the sidecar during `alchemy dev`. */
+/**
+ * A scoped local keyservice, hosted in the sidecar during `alchemy dev`.
+ * If any remote forward exits, all listeners and forwards close; the next plan restarts them.
+ */
 export interface SopsKeyService extends Resource<
   "Sops.KeyService",
   SopsKeyServiceProps,
   SopsKeyServiceAttributes
 > {}
 
-/** Serve until the deployment process or development session ends. */
+/**
+ * Serve until the deployment process or development session ends.
+ * A remote forward exiting closes the whole instance; the next plan restarts it.
+ */
 export const SopsKeyService = Resource<SopsKeyService>("Sops.KeyService");
 
 /** Serializable SSH forwarding settings for reaching a remote keyservice. */
@@ -93,6 +99,14 @@ const localModule = import.meta.resolve(
     : "./alchemy-local.js",
 );
 
+// Validate all serialized timeout props before converting them to Effect durations.
+const positiveSeconds = <E>(seconds: number | undefined, error: E) =>
+  seconds === undefined
+    ? Effect.succeed(undefined)
+    : !Number.isFinite(seconds) || seconds <= 0
+      ? Effect.fail(error)
+      : Effect.succeed(Duration.seconds(seconds));
+
 /** Register the keyservice provider with platform services captured at construction. */
 export const SopsKeyServiceProvider = () =>
   LocalProvider.make(
@@ -102,31 +116,37 @@ export const SopsKeyServiceProvider = () =>
       const spawner = yield* ChildProcessSpawner;
       return {
         start: Effect.fn("SopsKeyService.start")(function* ({ news, invalidate }) {
+          // Lazy imports keep the gRPC server out of the effect-sops root import graph.
           const { serve, Interaction } = yield* Effect.tryPromise({
             try: async () => ({
               ...(await import("./serve.js")),
               Interaction: await import("./interaction.js"),
             }),
-            catch: () =>
+            catch: (cause) =>
               new KeyServiceListenError({
                 reason: "BindFailed",
-                message: "Could not load the keyservice implementation",
+                message: "Could not import the keyservice server or interaction implementation",
+                cause,
               }),
           });
-          for (const seconds of [
-            news.dialog?.timeoutSeconds,
-            news.dialog?.valueTimeoutSeconds,
-            news.rememberApprovalSeconds,
-            news.requestTimeoutSeconds,
-          ]) {
-            if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0))
-              return yield* Effect.fail(
-                new KeyServiceListenError({
-                  reason: "InvalidAddress",
-                  message: "Keyservice timeouts must be positive finite seconds",
-                }),
-              );
-          }
+          if (
+            news.approval !== "dialog" &&
+            (news.dialog !== undefined || news.rememberApprovalSeconds !== undefined)
+          )
+            return yield* Effect.fail(
+              new KeyServiceListenError({
+                reason: "InvalidAddress",
+                message: 'dialog and rememberApprovalSeconds require approval: "dialog"',
+              }),
+            );
+          const timeoutError = new KeyServiceListenError({
+            reason: "InvalidAddress",
+            message: "Keyservice timeouts must be positive finite seconds",
+          });
+          const timeout = yield* positiveSeconds(news.dialog?.timeoutSeconds, timeoutError);
+          const valueTimeout = yield* positiveSeconds(news.dialog?.valueTimeoutSeconds, timeoutError);
+          const rememberApproval = yield* positiveSeconds(news.rememberApprovalSeconds, timeoutError);
+          const requestTimeout = yield* positiveSeconds(news.requestTimeoutSeconds, timeoutError);
           const dialog = news.dialog;
           let interaction = news.approval === "dialog"
             ? yield* Interaction.dialog({
@@ -134,17 +154,13 @@ export const SopsKeyServiceProvider = () =>
                 ...(dialog?.notifications === undefined
                   ? {}
                   : { notifications: dialog.notifications }),
-                ...(dialog?.timeoutSeconds === undefined
-                  ? {}
-                  : { timeout: Duration.seconds(dialog.timeoutSeconds) }),
-                ...(dialog?.valueTimeoutSeconds === undefined
-                  ? {}
-                  : { valueTimeout: Duration.seconds(dialog.valueTimeoutSeconds) }),
+                ...(timeout === undefined ? {} : { timeout }),
+                ...(valueTimeout === undefined ? {} : { valueTimeout }),
               }).pipe(Effect.provideService(ChildProcessSpawner, spawner))
             : Interaction.none;
-          if (news.approval === "dialog" && news.rememberApprovalSeconds !== undefined)
+          if (rememberApproval !== undefined)
             interaction = yield* Interaction.remember(interaction, {
-              ttl: Duration.seconds(news.rememberApprovalSeconds),
+              ttl: rememberApproval,
             });
           const running = yield* acquireInstance(
             serve({
@@ -154,9 +170,7 @@ export const SopsKeyServiceProvider = () =>
               ...(news.remoteForwards === undefined
                 ? {}
                 : { remoteForwards: news.remoteForwards }),
-              ...(news.requestTimeoutSeconds === undefined
-                ? {}
-                : { requestTimeout: Duration.seconds(news.requestTimeoutSeconds) }),
+              ...(requestTimeout === undefined ? {} : { requestTimeout }),
             }).pipe(Effect.provideService(ChildProcessSpawner, spawner)),
             (value) => value.tunnels,
             invalidate,
@@ -180,33 +194,30 @@ export const SopsKeyServiceTunnelProvider = () =>
       const spawner = yield* ChildProcessSpawner;
       return {
         start: Effect.fn("SopsKeyServiceTunnel.start")(function* ({ news, invalidate }) {
-          const { connect } = yield* Effect.tryPromise({
-            try: () => import("./serve.js"),
-            catch: () =>
+          // Load SSH directly and lazily so this resource never imports the gRPC server.
+          const { localForward } = yield* Effect.tryPromise({
+            try: () => import("./ssh.js"),
+            catch: (cause) =>
               new SshTunnelError({
                 reason: "SpawnFailed",
                 destination: "<configured destination>",
-                message: "Could not load the SSH tunnel implementation",
+                message: "Could not import the SSH tunnel implementation",
+                cause,
               }),
           });
           const { readyTimeoutSeconds, ...options } = news;
-          if (
-            readyTimeoutSeconds !== undefined &&
-            (!Number.isFinite(readyTimeoutSeconds) || readyTimeoutSeconds <= 0)
-          )
-            return yield* Effect.fail(
-              new SshTunnelError({
-                reason: "InvalidOptions",
-                destination: "<configured destination>",
-                message: "SSH readiness timeout must be positive finite seconds",
-              }),
-            );
+          const readyTimeout = yield* positiveSeconds(
+            readyTimeoutSeconds,
+            new SshTunnelError({
+              reason: "InvalidOptions",
+              destination: "<configured destination>",
+              message: "SSH readiness timeout must be positive finite seconds",
+            }),
+          );
           const tunnel = yield* acquireInstance(
-            connect({
+            localForward({
               ...options,
-              ...(readyTimeoutSeconds === undefined
-                ? {}
-                : { readyTimeout: Duration.seconds(readyTimeoutSeconds) }),
+              ...(readyTimeout === undefined ? {} : { readyTimeout }),
             }).pipe(Effect.provideService(ChildProcessSpawner, spawner)),
             (value) => [value],
             invalidate,
@@ -239,8 +250,12 @@ const acquireInstance = <A, E>(
     const forwards = tunnels(value);
     if (forwards.length > 0)
       yield* Effect.raceAllFirst(forwards.map((tunnel) => tunnel.awaitExit)).pipe(
-        Effect.exit,
-        Effect.flatMap(() => Scope.close(scope, Exit.void)),
+        // Preserve scope interruption so normal shutdown does not warn or invalidate.
+        Effect.catch(() => Effect.void),
+        Effect.andThen(Effect.logWarning(
+          "SSH forward exited; closing and invalidating the keyservice instance. The next plan will restart it.",
+        )),
+        Effect.andThen(Scope.close(scope, Exit.void)),
         Effect.andThen(invalidate),
         // The watcher belongs to the parent, so closing the child cannot interrupt cleanup.
         Effect.forkScoped,

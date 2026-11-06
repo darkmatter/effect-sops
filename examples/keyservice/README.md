@@ -21,6 +21,11 @@ exposes the local service on the remote machine's loopback port 5000. SSH
 needs working noninteractive authentication. Tailscale must already be
 running; dialogs require macOS.
 
+Every client arriving through `ssh -R` appears to the service as `127.0.0.1`.
+Remembered approvals cover every user of that remote host who can reach the
+forward, plus local clients with the same peer host, operation, and key. The
+`devbox` configuration asks on every request for this reason.
+
 When stdin is not a terminal, select a name with `KEYSERVICE_CONFIG`:
 
 ```sh
@@ -35,21 +40,36 @@ still needs an interactive macOS desktop.
 
 Identity discovery uses SOPS environment sources and the platform's SOPS
 `keys.txt`. It happens on requests, not when this example is imported.
-Native identities run before plugin identities during decryption after
-recipient preflight succeeds. Configure `AGE-PLUGIN-…` identities and install
-the corresponding `age-plugin-*` executable for hardware-backed keys.
+Decryption uses only the native identity for the approved recipient, or its
+matching plugin group. A plugin group may contain multiple identities; the
+approval does not select an individual identity within that group. Configure
+`AGE-PLUGIN-…` identities and install the corresponding `age-plugin-*`
+executable for hardware-backed keys. Unlike upstream SOPS, SSH age recipients
+(`ssh-ed25519` and `ssh-rsa`) and SSH private-key identity discovery are not
+supported. This restriction does not affect SSH transport forwards.
 
 Requests are serialized. Preflight may read identity sources to find a
 matching recipient before prompting. Approval comes before cryptographic key
 operations, key commands, and plugin interactions. Unsupported keys and
-known missing identities fail without a prompt. Remembered approval covers
+known missing identities fail without a prompt. `SOPS_AGE_KEY_CMD` runs only
+after approval, so preflight cannot refuse a recipient as missing when only
+that command can supply its identity. The command may prompt separately after
+approval. Remembered approval covers
 the same peer host, operation, and key; it never skips plugin PIN or touch
 requests.
 
+`requestTimeout` defaults to five minutes from the start of a request's turn,
+excluding queue time. At most `maxPendingRequests` requests wait (default: 16);
+additional requests fail with `RESOURCE_EXHAUSTED`. Client deadlines can
+expire sooner, including while waiting for a turn.
+
 The protocol has no authentication or encryption. Prefer loopback or Unix
 sockets; use SSH or a Tailscale tailnet with ACLs for remote access. Keep
-approval enabled on network listeners. The server warns if a network listener
-uses the default interaction without approval. See the root
+approval enabled on network listeners. The server warns when requests are
+approved without asking and either a non-loopback listener or any SSH remote
+forward is configured. TCP addresses require a host: use `127.0.0.1:5000` for
+loopback or `0.0.0.0:5000` for all IPv4 interfaces; SOPS's `--address :5000`
+shorthand is not supported. See the root
 [API examples and command parity table](../../README.md#serve-a-sops-keyservice).
 
 ## Reach a remote service
@@ -66,6 +86,12 @@ When embedding it, `decryptThroughTunnel(destination, path)` returns
 `Promise<string>` containing plaintext. Pass it directly to its consumer.
 `decryptThroughKeyService(uri, path)` provides the same native decrypt as an
 Effect when a service URI is already available.
+
+For a scoped Effect client, use `Ssh.localForward` from
+`effect-sops/KeyService`. Promise tunnel handles expose `exited: Promise<void>`;
+server handles expose the same signal on each `service.tunnels[i]`. A dropped
+remote forward logs its destination. Standalone servers keep their local
+listeners running and do not reconnect automatically.
 
 When a service is listening locally, the SOPS CLI can use it too:
 
@@ -87,6 +113,11 @@ Use `SopsKeyServiceTunnel` when the stack should reach an existing remote
 service. Both Alchemy resources live for the deployment process; `alchemy dev`
 keeps them in its local sidecar across hot reloads. Identity file paths may be
 resource props; identity contents must never enter Alchemy state.
+
+If any `SopsKeyService` remote forward exits, the resource logs a warning and
+closes its whole instance, including local listeners and the other forwards.
+The next Alchemy plan or deploy starts a replacement. There is no automatic
+restart between plans.
 
 ## Manual YubiKey check
 

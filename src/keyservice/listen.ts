@@ -77,8 +77,12 @@ const parseSops = (network: "tcp" | "unix", address: string): ListenAddress => {
     return parsed;
   }
   if (network !== "tcp") throw invalid("Listener network must be tcp or unix");
-  const parts = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(address);
+  const parts = /^(?:\[([^\]]+)\]|([^:]*)):(\d+)$/.exec(address);
   const host = parts?.[1] ?? parts?.[2];
+  if (parts && !host)
+    throw invalid(
+      `an empty host would listen on every interface; pass 0.0.0.0:${parts[3]} or [::]:${parts[3]} explicitly`,
+    );
   if (!parts || !host || (parts[1] && isIP(host) !== 6))
     throw invalid("TCP listener address must be host:port or [IPv6]:port");
   const parsed = tcp(host, Number(parts[3]));
@@ -86,7 +90,7 @@ const parseSops = (network: "tcp" | "unix", address: string): ListenAddress => {
   return parsed;
 };
 
-/** Parse the address accepted by `sops keyservice --network tcp|unix`. */
+/** Parse a SOPS tcp|unix address; wildcard TCP hosts must be explicit. */
 export const fromSops = (
   network: "tcp" | "unix",
   address: string,
@@ -158,14 +162,21 @@ export const tailscaleAddress: (
       catch: () => unavailable("could not inspect network interfaces"),
     }).pipe(Effect.orElseSucceed(() => ({})));
     const candidates = new Set(
-      Object.values(interfaces).flatMap((entries) =>
-        (entries ?? [])
+      Object.values(interfaces).flatMap((entries) => {
+        // CGNAT alone is shared with carriers and other VPNs; qualify each interface.
+        if (
+          !entries?.some(
+            (entry) => !entry.internal && isTailscaleAddress(entry.address, 6),
+          )
+        )
+          return [];
+        return entries
           .filter(
             (entry) =>
               !entry.internal && isTailscaleAddress(entry.address, family),
           )
-          .map((entry) => entry.address),
-      ),
+          .map((entry) => entry.address);
+      }),
     );
     if (candidates.size === 1) return candidates.values().next().value!;
     const spawner = yield* ChildProcessSpawner;
