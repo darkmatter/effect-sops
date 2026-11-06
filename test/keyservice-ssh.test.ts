@@ -554,7 +554,9 @@ describe("SSH forwards", () => {
     }
   });
   test("continues draining noisy stderr after readiness", async () => {
-    await mode("noisy", () =>
+    // After readiness the fake writes ~4 MiB to stderr and then exits, which
+    // it can only do while the tunnel keeps draining the pipe.
+    const exited = await mode("noisy", () =>
       run(
         Effect.gen(function* () {
           const tunnel = yield* remoteForward({
@@ -562,10 +564,17 @@ describe("SSH forwards", () => {
             remotePort: 0,
             target,
           });
-          yield* tunnel.awaitExit.pipe(Effect.timeout("3 seconds"));
+          return yield* tunnel.awaitExit.pipe(
+            Effect.as(true),
+            Effect.timeoutOrElse({
+              duration: "3 seconds",
+              orElse: () => Effect.succeed(false),
+            }),
+          );
         }),
       ),
     );
+    expect(exited).toBe(true);
   });
   test("recognizes the alternate remote forwarding failure warning", async () => {
     await mode("forward-warning", async () => {
