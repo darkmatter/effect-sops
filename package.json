@@ -3,6 +3,9 @@
   "version": "0.12.2",
   "description": "Effect-native SOPS Schema decoding and optional Alchemy resources with redacted secret outputs.",
   "type": "module",
+  "bin": {
+    "effect-sops-keyservice": "./dist/keyservice-cli.js"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/darkmatter/effect-sops.git"
@@ -50,6 +53,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:bin": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile dist-bin/effect-sops-keyservice src/keyservice-cli.ts",
     "check": "tsc --noEmit",
     "prepack": "bun run build",
     "release": "release-it",

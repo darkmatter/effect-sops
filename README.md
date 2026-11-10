@@ -20,6 +20,7 @@ and non-age backends.
   - [Decode an imported JSON document](#decode-an-imported-json-document)
   - [Native SOPS keyservices](#native-sops-keyservices)
   - [Edge usage](#edge-usage)
+- [Standalone keyservice binary](#standalone-keyservice-binary)
 - [Before an Alchemy stack](#before-an-alchemy-stack)
 - [At a deployment target](#at-a-deployment-target)
   - [Cloudflare Secrets Store](#cloudflare-secrets-store)
@@ -356,6 +357,93 @@ Leaf decryption is `sops-age`'s own (its `dataKey` option), so the two native
 backends share one implementation; the KMS adapter and age decryption without keyservice configuration do not verify
 the document-level `sops.mac`. The native keyservice path does verify it. JSON and YAML only; the document
 must be passed as `content`.
+
+## Standalone keyservice binary
+
+`effect-sops-keyservice` is a compiled keyservice for hosts without Bun, Node,
+or the `sops` binary. It speaks the SOPS keyservice gRPC protocol and unwraps
+data keys with age identities.
+
+### Install
+
+Release assets are per platform — `linux-x64`, `linux-arm64`, `darwin-x64`,
+`darwin-arm64`, and `windows-x64.exe` — and each ships a `.sha256` checksum:
+
+```sh
+asset=effect-sops-keyservice-linux-x64        # or -darwin-arm64, -windows-x64.exe, …
+base="https://github.com/darkmatter/effect-sops/releases/download/vX.Y.Z"
+curl -fsSLO "$base/$asset"
+curl -fsSLO "$base/$asset.sha256"
+sha256sum -c "$asset.sha256"                  # shasum -a 256 -c on macOS
+chmod +x "$asset"
+```
+
+Or install the npm package and run the same entry point (needs Bun):
+`bun add -g effect-sops`, then `effect-sops-keyservice`.
+
+### Run
+
+```sh
+# TCP on the loopback default; the bound address is printed to stderr
+effect-sops-keyservice
+
+effect-sops-keyservice --network tcp --address 127.0.0.1:5000
+effect-sops-keyservice --network unix --address /run/sops/keyservice.sock
+```
+
+`--network unix` requires an explicit `--address`; TCP defaults to
+`127.0.0.1:5000` and accepts port `0` to bind an ephemeral port, which is
+reported in the readiness line on stderr. `--help` works without any key
+material. SIGINT and SIGTERM shut the server down cleanly.
+
+Clients use the URI form of the printed address, exactly like the TypeScript
+client: `SOPS_KEYSERVICE=tcp://127.0.0.1:5000` or
+`SOPS_KEYSERVICE=unix:///run/sops/keyservice.sock`.
+
+The Unix listener refuses existing paths. Its bound path belongs to the
+listener until shutdown, when the runtime removes it. Stop the listener before
+replacing or reusing that path.
+
+### Identities
+
+Identities are read in this order:
+
+1. `SOPS_AGE_KEY` — inline age identity
+2. `SOPS_AGE_KEY_FILE` — path to an age identity file
+3. the default SOPS age key file: `$XDG_CONFIG_HOME/sops/age/keys.txt` or
+   `~/.config/sops/age/keys.txt` on Linux; `~/Library/Application Support/sops/age/keys.txt`
+   on macOS (unless `XDG_CONFIG_HOME` is set); `%APPDATA%\sops\age\keys.txt` on Windows
+
+An explicit source is authoritative: when `SOPS_AGE_KEY` or
+`SOPS_AGE_KEY_FILE` is set, other identities are not silently loaded. Private
+keys are never accepted as command-line arguments.
+
+### Scope and transport
+
+- **age only.** Age recipients are supported. Other SOPS key types (AWS KMS,
+  GCP KMS, Azure Key Vault, HashiCorp Vault, PGP) are rejected; decrypt KMS
+  documents with `runSopsKms` instead.
+- **Unauthenticated plaintext gRPC.** The SOPS keyservice protocol has no
+  authentication and no TLS. The default endpoint is loopback; binding TCP to
+  another interface is allowed but warns. Expose it remotely only through a
+  trusted protected channel — an mTLS-terminating proxy, a WireGuard or
+  Tailscale network, or an SSH tunnel — and never directly to an untrusted
+  network.
+- The compiled executable does not load `.env` or `bunfig.toml` from its
+  working directory and embeds no identities or environment values.
+
+### Build from source
+
+```sh
+bun install
+bun run build:bin
+./dist-bin/effect-sops-keyservice --help
+```
+
+`bun run build:bin` compiles `src/keyservice-cli.ts` for the host. Release
+assets are built in CI from the tag's version-bump commit; use Bun's
+`--target` (for example `--target=bun-linux-arm64` and
+`--outfile dist-bin/effect-sops-keyservice-linux-arm64`) to cross-compile.
 
 ## Before an Alchemy stack
 

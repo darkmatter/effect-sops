@@ -20,6 +20,8 @@
 - Document MAC verification on the keyservice path, bounded RPC deadlines,
 - Native TypeScript SOPS keyservice support over Unix sockets and TCP in Node and Bun, using the existing @drkmttr/sops-age data-key API. Schema, Config, resources, and Actions support SOPS_KEYSERVICE, SOPS_ENABLE_LOCAL_KEYSERVICE, and explicit per-call options
 - Document MAC verification on the keyservice path, bounded RPC deadlines, interruption cleanup, and endpoint-aware decryption cache keys. Configured keyservices never fall back to invoking the SOPS CLI
+- `effect-sops-keyservice`: a standalone age-only keyservice binary compiled with `bun run build:bin` (also exposed as an npm `bin`). Release assets cover Linux x64/arm64, macOS x64/arm64, and Windows x64 with SHA-256 checksums, default to loopback, and do not load `.env` or `bunfig.toml`.
+
 ## 0.11.0 - 2026-10-08
 
 ### Changed
