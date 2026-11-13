@@ -1,4 +1,4 @@
-import { expect, test as bunTest } from "bun:test";
+import { expect, test } from "bun:test";
 import * as net from "node:net";
 import * as Output from "alchemy/Output";
 import * as Test from "alchemy/Test/Bun";
@@ -22,12 +22,12 @@ import { SopsFile, SopsFileProvider } from "../src/resource.ts";
 import { runSopsAge } from "../src/sops-age.ts";
 import encrypted from "./fixtures/native.enc.json" with { type: "json" };
 
-bunTest("the sidecar entry default-exports a Layer", async () => {
+test("the sidecar entry default-exports a Layer", async () => {
   const entry = await import("../src/keyservice/alchemy-local.ts");
   expect(Layer.isLayer(entry.default)).toBe(true);
 });
 
-const { test } = Test.make({
+const { test: keyServiceTest } = Test.make({
   providers: Layer.mergeAll(keyServiceProviders(), SopsFileProvider()),
 });
 
@@ -88,7 +88,7 @@ const awaitRefused = (uri: string) =>
     }),
   );
 
-test.provider("keyservice decrypts, preserves a noop, updates, and closes on destroy", (stack) =>
+keyServiceTest.provider("keyservice decrypts, preserves a noop, updates, and closes on destroy", (stack) =>
   Effect.gen(function* () {
     const { props } = yield* fixture;
     // Both ports are occupied before update, so the replacement cannot reuse the old URI.
@@ -121,7 +121,7 @@ test.provider("keyservice decrypts, preserves a noop, updates, and closes on des
   }),
 );
 
-test.provider("SopsFile resolves a keyservice Output URI before decryption", (stack) =>
+keyServiceTest.provider("SopsFile resolves a keyservice Output URI before decryption", (stack) =>
   Effect.gen(function* () {
     const { props, document } = yield* fixture;
     const deployed = yield* stack.deploy(Effect.gen(function* () {
@@ -144,7 +144,7 @@ test.provider("SopsFile resolves a keyservice Output URI before decryption", (st
   }),
 );
 
-test.provider("SSH tunnel decrypts Output consumers and restarts after its child exits", (stack) =>
+keyServiceTest.provider("SSH tunnel decrypts Output consumers and restarts after its child exits", (stack) =>
   Effect.gen(function* () {
     const { props, document, ssh, pidFile, fs } = yield* fixture;
     const program = Effect.gen(function* () {
@@ -206,7 +206,7 @@ test.provider("SSH tunnel decrypts Output consumers and restarts after its child
   { timeout: 30_000 },
 );
 
-test.provider("keyservice example deploys and destroys using its explicit fixture identity file", (stack) =>
+keyServiceTest.provider("keyservice example deploys and destroys using its explicit fixture identity file", (stack) =>
   Effect.gen(function* () {
     const { identityFile } = yield* fixture;
     const deployed = yield* stack.deploy(exampleProgram(identityFile));
@@ -217,7 +217,7 @@ test.provider("keyservice example deploys and destroys using its explicit fixtur
   }),
 );
 
-test.provider("a dead remote forward closes its keyservice instance before replacement", (stack) => {
+keyServiceTest.provider("a dead remote forward closes its keyservice instance before replacement", (stack) => {
   let warningCount = 0;
   const logger = Logger.make(({ logLevel, message }) => {
     if (
@@ -276,7 +276,7 @@ for (const [name, options] of [
   ["dialog with approval none", { approval: "none", dialog: {} }],
   ["remember with approval none", { approval: "none", rememberApprovalSeconds: 60 }],
 ] satisfies ReadonlyArray<readonly [string, SopsKeyServiceProps]>) {
-  test.provider(`rejects ${name}`, (stack) => Effect.gen(function* () {
+  keyServiceTest.provider(`rejects ${name}`, (stack) => Effect.gen(function* () {
     const { props } = yield* fixture;
     const result = yield* stack.deploy(SopsKeyService("KeyService", { ...props, ...options })).pipe(
       Effect.match({
