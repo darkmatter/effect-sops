@@ -76,3 +76,14 @@ export {
 export * from "./errors.js";
 
 export type { SopsKeyServiceOptions } from "./keyservice-options.js";
+export {
+  SopsKeyService,
+  SopsKeyServiceTunnel,
+  SopsKeyServiceProvider,
+  SopsKeyServiceTunnelProvider,
+  keyServiceProviders,
+  type SopsKeyServiceProps,
+  type SopsKeyServiceAttributes,
+  type SopsKeyServiceTunnelProps,
+  type SopsKeyServiceTunnelAttributes,
+} from "./keyservice/alchemy.js";

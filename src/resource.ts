@@ -2,6 +2,8 @@ import { keyServiceSettings, type SopsKeyServiceOptions } from "./keyservice-opt
 import type { Resource as AlchemyResource } from "alchemy";
 import { Resource } from "alchemy";
 import * as Diff from "alchemy/Diff";
+import type { InputProps } from "alchemy/Input";
+import type { Output } from "alchemy/Output";
 import * as Provider from "alchemy/Provider";
 import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -90,7 +92,10 @@ export type RedactSecretLeaves<T> = T extends ReadonlyArray<infer U>
  */
 export type SopsRedactedDocument<T> = RedactSecretLeaves<OmitSopsMetadata<T>>;
 
-export interface SopsFileOptions<R = never> extends SopsKeyServiceOptions {
+export interface SopsFileOptions<R = never>
+  extends Omit<SopsKeyServiceOptions, "keyServices"> {
+  /** Keyservice URIs, including resource outputs resolved by Alchemy. */
+  readonly keyServices?: readonly (string | Output<string>)[];
   readonly path?: SecretStringInput<R> | readonly SecretStringInput<R>[];
   readonly content?: SecretStringInput<R>;
   readonly url?: SecretStringInput<R>;
@@ -320,7 +325,7 @@ export const providers = SopsFileProvider;
 
 const normalizeOptions = <R>(
   options: SopsFileOptions<R>,
-): Effect.Effect<SopsFileProps, never, R> =>
+): Effect.Effect<InputProps<SopsFileProps>, never, R> =>
   Effect.gen(function* () {
     const path = yield* resolveOptionalPathInput(options.path);
     const content = yield* resolveOptionalSecretStringInput(options.content);
@@ -714,7 +719,10 @@ const hashLoadedSource = (
             secrets: props.secrets,
             schemaKey: props.schemaKey,
             providerVersion: PROVIDER_VERSION,
-            keyService: keyServiceSettings(buildSopsCommandRequest({ source: {}, options: props })),
+            // Transport endpoints can change without changing decrypted content.
+            enableLocalKeyService: keyServiceSettings(
+              buildSopsCommandRequest({ source: {}, options: props }),
+            ).enableLocalKeyService,
             types: props.types,
           }),
         ),
@@ -856,7 +864,12 @@ const bytesToHex = (bytes: Uint8Array): string =>
 const sameProps = (
   olds: SopsFileProps | undefined,
   news: SopsFileProps,
-): boolean => JSON.stringify(olds ?? {}) === JSON.stringify(news);
+): boolean => {
+  // Ephemeral keyservice ports must not trigger a new decryption or approval.
+  const { keyServices: _oldUris, ...oldProps } = olds ?? {};
+  const { keyServices: _newUris, ...newProps } = news;
+  return JSON.stringify(oldProps) === JSON.stringify(newProps);
+};
 
 const normalizeGeneratedTypes = (
   options: SopsGeneratedTypesInput,

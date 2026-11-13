@@ -2,7 +2,7 @@
 
 Every directory is a runnable, focused example. Start with **when the
 decrypted value is needed**; the directories below are variations within that
-lifecycle, not six unrelated ways to use the package.
+lifecycle.
 
 The shared encrypted fixture uses a public test-only age identity so the smoke
 suite can prove decryption. Copy the code, but always encrypt your own document
@@ -51,6 +51,12 @@ validated imported SOPS JSON:
 SOPS_AGE_KEY=... bun examples/schema-decoder/main.ts
 ```
 
+When another program needs access to an age identity, use a keyservice:
+
+| Example | Variation | Run it locally |
+| --- | --- | --- |
+| [`keyservice`](./keyservice) | Named server configurations, SSH client, Alchemy resources, and a manual YubiKey check. | `KEYSERVICE_CONFIG=local bun examples/keyservice/serve.ts` |
+
 ## Smoke checks
 
 ```sh
@@ -61,3 +67,7 @@ bun run smoke:examples
 `examples/smoke.test.ts` runs in CI after the package build. It decrypts the
 shared fixture for every SOPS entry point and uses local mock APIs to prove the
 Cloudflare and GitHub examples make the expected secret-management requests.
+It also starts the keyservice example on a random loopback port and decrypts
+through it. The script runs from `test/` so its hermetic preload isolates
+identity discovery from workstation credentials. The manual YubiKey example is never part of the
+smoke suite.

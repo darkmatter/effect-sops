@@ -16,9 +16,11 @@ and non-age backends.
 - [Inside an Alchemy stack](#inside-an-alchemy-stack)
   - [Read a SOPS document](#read-a-sops-document)
   - [Type a JSON import](#type-a-json-import)
+  - [Keep a keyservice in the stack](#keep-a-keyservice-in-the-stack)
 - [Without an Alchemy stack](#without-an-alchemy-stack)
   - [Decode an imported JSON document](#decode-an-imported-json-document)
   - [Native SOPS keyservices](#native-sops-keyservices)
+  - [Serve a SOPS keyservice](#serve-a-sops-keyservice)
   - [Edge usage](#edge-usage)
 - [Standalone keyservice binary](#standalone-keyservice-binary)
 - [Before an Alchemy stack](#before-an-alchemy-stack)
@@ -181,6 +183,61 @@ preserved, so the SOPS MAC still verifies. Every scalar leaf is mapped to
 the redacted `data` output. Reach for `schema` instead when you also want
 runtime validation or non-redacted leaf types.
 
+### Keep a keyservice in the stack
+
+```ts
+import * as Alchemy from "alchemy";
+import { keyServiceProviders, SopsFile, SopsFileProvider, SopsKeyServiceTunnel } from "effect-sops";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+
+export default Alchemy.Stack(
+  "App",
+  {
+    providers: Layer.mergeAll(keyServiceProviders(), SopsFileProvider()),
+    state: Alchemy.localState(),
+  },
+  Effect.gen(function* () {
+    const tunnel = yield* SopsKeyServiceTunnel("KeyTunnel", {
+      destination: "user@keyhost",
+      remotePort: 5000,
+    });
+    const secrets = yield* SopsFile("Secrets", {
+      path: "./secrets.enc.json",
+      keyServices: [tunnel.uri],
+      enableLocalKeyService: false,
+    });
+    return { secrets: secrets.data };
+  }),
+);
+```
+
+When the identity is on another machine, use `SopsKeyServiceTunnel` to reach
+its running keyservice over SSH. When the stack should host the keyservice,
+use `SopsKeyService` and pass its `uri` to `SopsFile` instead:
+
+```ts
+import { SopsKeyService } from "effect-sops";
+import { Listen } from "effect-sops/KeyService";
+
+// Inside the stack's Effect.gen, with keyServiceProviders() installed.
+const service = yield* SopsKeyService("KeyService", {
+  listen: [Listen.loopback(0)],
+  age: { identityFiles: ["./identities.age"], discover: false },
+});
+```
+
+Both resources live for the deployment process; `alchemy dev` hosts them in
+its local sidecar across hot reloads. They do not deploy a permanent daemon.
+Resource props accept identity file paths, never identity contents. Use
+`approval: "dialog"` on macOS and `rememberApprovalSeconds` when approval is
+needed. See the [runnable Alchemy example](./examples/keyservice/alchemy.run.ts).
+
+If a `SopsKeyService` remote SSH forward exits, the resource logs a warning and
+closes the whole instance, including local listeners and its other forwards.
+The next Alchemy plan or deploy starts a replacement; it does not restart
+automatically between plans.
+
 ## Without an Alchemy stack
 
 ### Decode an imported JSON document
@@ -303,6 +360,156 @@ The Unix/TCP gRPC transport is available in the Node/Bun entry points. The
 `effect-sops/edge` entry point stays free of that transport and reports an error
 if keyservices are requested. SOPS's keyservice protocol uses unauthenticated,
 unencrypted gRPC; remote endpoints should use an existing secure tunnel.
+
+### Serve a SOPS keyservice
+
+```ts
+// serve.ts — run with bun serve.ts, then press Ctrl+C to stop.
+import { startKeyService } from "effect-sops/KeyService";
+
+await using service = await startKeyService({ prompt: true });
+console.log(`Keyservice listening at ${service.uri}`);
+await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+```
+
+When other programs need your age identity, serve the upstream SOPS gRPC API
+from TypeScript. The default is `tcp://127.0.0.1:5000`. The built-in handler
+supports age encryption and decryption, including installed age plugins.
+Unlike upstream SOPS, it does not support SSH age recipients (`ssh-ed25519`
+or `ssh-rsa`) or SSH private-key identity discovery. SSH transport forwards
+are supported independently of those key formats.
+`effect-sops/KeyService` does not import Alchemy or require the `sops` binary.
+
+`startKeyService(options?)` returns a Promise of a handle with `uri`, `uris`,
+`addresses`, `tunnels`, `close()` and async disposal. Leaving an `await using`
+block closes its listeners and SSH forwards. For a process that only serves,
+`await runKeyService({ prompt: true })` waits for SIGINT or SIGTERM and cleans
+up; it also accepts an `AbortSignal` as `signal`.
+
+Each remote forward exposes `service.tunnels[i].exited: Promise<void>`, which
+completes when that forward exits or the service closes. A dropped forward
+logs its destination; the standalone service keeps its listeners running and
+does not reconnect automatically.
+
+Choose either `listen` or the `network`, `address`, and `tailscale` shortcuts:
+`startKeyService` rejects combinations of `listen` with any of those shortcuts.
+TCP addresses require an explicit host. Unlike SOPS's `--address :5000`, use
+`address: "127.0.0.1:5000"` for loopback or `address: "0.0.0.0:5000"` for all
+IPv4 interfaces.
+
+The Promise API loads `@effect/platform-bun` on Bun or `@effect/platform-node`
+on Node. Install the matching Effect 4 platform package alongside `effect`.
+Dialogs need macOS and `osascript`. Terminal approval needs an interactive
+terminal. SSH forwards need `ssh` with noninteractive authentication already
+configured. Tailscale listeners need a running Tailscale connection.
+
+When your program already uses Effect, own the listener with a scope:
+
+```ts
+import * as BunRuntime from "@effect/platform-bun/BunRuntime";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import { Interaction, Listen, serve } from "effect-sops/KeyService";
+import * as Effect from "effect/Effect";
+
+BunRuntime.runMain(
+  Effect.gen(function* () {
+    const interaction = yield* Interaction.terminal();
+    yield* serve({ listen: Listen.loopback(5000), interaction });
+    yield* Effect.never;
+  }).pipe(Effect.scoped, Effect.provide(BunServices.layer)),
+);
+```
+
+`serve(options?)` returns a scoped Effect with `uri`, `uris`, `addresses`, and
+`tunnels`. `Ssh.localForward(options)` opens a scoped local SSH forward. Closing the
+scope stops its servers and child processes.
+
+| SOPS or SSH command | Promise API | Effect API |
+| --- | --- | --- |
+| `sops keyservice` | `runKeyService()` | `serve()` |
+| `--network unix --address /tmp/sops.sock` | `{ network: "unix", address: "/tmp/sops.sock" }` | `{ listen: Listen.unix("/tmp/sops.sock") }` |
+| `--prompt` | `{ prompt: true }` | `{ interaction: yield* Interaction.terminal() }` |
+| No SOPS equivalent: macOS approval and plugin PIN dialogs | `{ dialog: true }` | `{ interaction: yield* Interaction.dialog() }` |
+| `--address "$(tailscale ip -4):5000" --prompt` | `{ tailscale: true, prompt: true }` | `{ listen: Listen.tailscale(5000), interaction: yield* Interaction.terminal() }` |
+| `ssh -L 5000:127.0.0.1:5000 user@host` | `openKeyServiceTunnel({ destination: "user@host", localPort: 5000 })` | `Ssh.localForward({ destination: "user@host", localPort: 5000 })` |
+| `ssh -R 5000:127.0.0.1:5000 user@host` | `{ ssh: "user@host" }` | `{ remoteForwards: [{ destination: "user@host" }] }` |
+| `--verbose` | `{ verbose: true }` | Provide `References.MinimumLogLevel` with `"Debug"` |
+
+When the service is on another machine, decrypt through a local SSH tunnel:
+
+```ts
+import { runSopsAge } from "effect-sops";
+import { openKeyServiceTunnel } from "effect-sops/KeyService";
+import * as Effect from "effect/Effect";
+
+await using tunnel = await openKeyServiceTunnel({ destination: "user@keyhost" });
+const plaintext = await Effect.runPromise(runSopsAge({
+  path: "./secrets.enc.json",
+  binary: "sops",
+  inputType: "json",
+  outputType: "json",
+  keyServices: [tunnel.uri],
+  enableLocalKeyService: false,
+  timeoutMs: 120_000,
+}));
+// Pass plaintext directly to its consumer; do not log it.
+```
+
+`runSopsAge` returns plaintext text; `binary` is part of its request contract
+but this native path does not invoke it. The package-root import above needs
+the optional `alchemy` peer even when no stack is used. Use
+`effect-sops/Schema` when you need an Alchemy-free client with schema decoding.
+
+The CLI can use the same service. For a local listener on port 5000, verify
+decryption without writing the plaintext to your terminal:
+
+```sh
+sops decrypt --enable-local-keyservice=false \
+  --keyservice tcp://127.0.0.1:5000 ./secrets.enc.json > /dev/null
+```
+
+Requests run one at a time, including approval and plugin interaction. The
+`requestTimeout` defaults to five minutes, starting when the request's turn
+begins; queue time does not consume that budget. At most `maxPendingRequests`
+requests wait (default: 16); additional requests fail with `RESOURCE_EXHAUSTED`.
+Client RPC deadlines can still expire while waiting or during approval.
+
+The server asks for approval before it encrypts or decrypts a data key or starts a
+plugin; upstream SOPS prompts after doing the key operation. Preflight may
+read configured identities and files to refuse unsupported keys or known
+missing identities before prompting, but it never runs `SOPS_AGE_KEY_CMD`.
+The key command runs only after approval. A recipient served only by that
+command cannot be refused as missing before the approval prompt; its command
+may then prompt separately, for example to unlock a password manager. A plugin can
+still fail after approval, for example on a wrong PIN or a missing device.
+
+Identity discovery reads `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`,
+`SOPS_AGE_KEY_CMD`, and the platform's SOPS `keys.txt`. Explicit `identities`
+or `identityFiles` disable discovery unless `discover: true` is set. Sources
+are reloaded for each request. Decryption uses only the native identity for
+the approved recipient, or only that recipient's matching plugin group.
+Plugin groups may contain multiple identities; approval does not select an
+individual identity within the matching plugin group.
+`age-plugin-yubikey` PIN requests use the chosen terminal or macOS dialog,
+followed by the hardware touch when required.
+
+Set `rememberApproval: "5 minutes"` on the Promise API, or wrap an interaction
+with `yield* Interaction.remember(interaction, { ttl: "5 minutes" })` in Effect.
+Approvals are remembered for the same peer host, operation, and complete key.
+Denials are not remembered. Plugin follow-ups, including PINs and touch, are
+never skipped by the approval cache. A peer host is not a user identity:
+all `ssh -R` peers appear as `127.0.0.1`. Remembered approvals therefore cover
+every user of the remote host who can reach that forward, as well as local
+clients with the same peer host, operation, and key.
+
+The keyservice protocol has **no authentication or encryption**, just like
+upstream SOPS. Keep listeners on loopback or Unix sockets. Reach them through
+SSH or a Tailscale tailnet with ACLs, and require approval when reachable from
+the network. The server logs a warning when requests are approved without
+asking and either a non-loopback listener or any SSH remote forward is
+configured. Unix sockets default to mode `0600`.
+
+See [named server configurations and the manual YubiKey check](./examples/keyservice/README.md).
 
 ### Edge usage
 

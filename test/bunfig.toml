@@ -1,0 +1,3 @@
+[test]
+# Keep the developer's real age identities out of every test run.
+preload = ["./hermetic.ts"]
