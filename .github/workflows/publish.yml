@@ -2,9 +2,12 @@ name: Publish to npm
 
 # Push a vX.Y.Z tag at the current main to release. The release job bumps
 # package.json to the tag's version with release-it, commits that bump to
-# main, and creates the GitHub Release; the publish job then publishes the
-# bumped main to npm. Both jobs live in this file because npm trusted
-# publishing authorizes the workflow file that starts the run (publish.yml).
+# main, and creates the GitHub Release; the resolve job pins that exact
+# version-bump commit; the binaries job builds the standalone keyservice
+# executable from it and attaches the platform assets to the same GitHub
+# Release; the publish job publishes that same commit to npm. All jobs live in
+# this file because npm trusted publishing authorizes the workflow file that
+# starts the run (publish.yml).
 on:
   push:
     tags:
@@ -23,6 +26,9 @@ concurrency:
   group: npm-publish
   cancel-in-progress: false
 
+env:
+  TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+
 jobs:
   release:
     name: Bump version and create GitHub Release
@@ -30,6 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      commit_sha: ${{ steps.bump.outputs.commit_sha }}
     steps:
       - name: Derive version from tag
         id: release
@@ -83,31 +92,224 @@ jobs:
         run: bun run test
 
       - name: Bump version and create GitHub Release
-        run: bun run release -- --ci "${{ steps.release.outputs.version }}"
+        id: bump
+        run: |
+          bun run release -- --ci "${{ steps.release.outputs.version }}"
+          # Downstream jobs build from this commit, never from mutable main.
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish:
-    name: Publish package
+  resolve:
+    name: Resolve release commit
     needs: release
     # Runs after a successful release job, or alone for a manual republish.
     if: >-
       always() && github.repository == 'darkmatter/effect-sops' &&
       (needs.release.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.release.result == 'skipped'))
     runs-on: ubuntu-latest
-    environment: npm
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
     steps:
-      # main, not the tag: the tag is the commit before release-it's bump.
       - name: Checkout main
         uses: actions/checkout@v7
         with:
           ref: main
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Resolve the immutable version-bump commit
+        id: resolve
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.release.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          if [[ "$version" == "$TAG_NAME" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tags must look like vX.Y.Z, optionally with a prerelease/build suffix."
+            exit 1
+          fi
+
+          tag_sha="$(git rev-list -n 1 "$TAG_NAME")"
+          sha="${RELEASE_SHA:-}"
+          if [[ -z "$sha" ]]; then
+            # Manual republish: release-it keeps the tag on the commit *before*
+            # its version bump and moves no tags, so derive the bump as the
+            # tag's first descendant on main, then validate it. Never trust
+            # mutable main here.
+            mapfile -t descendants < <(git rev-list --first-parent --reverse "$tag_sha..main")
+            sha="${descendants[0]:-}"
+          fi
+
+          if [[ -z "$sha" ]]; then
+            echo "::error::Could not identify the v$version version-bump commit on main."
+            exit 1
+          fi
+          if [[ "$(git rev-list --parents -n 1 "$sha")" != "$sha $tag_sha" ]]; then
+            echo "::error::$sha is not the direct version-bump child of $TAG_NAME."
+            exit 1
+          fi
+          if [[ "$(git log -1 --format=%s "$sha")" != "chore: release v$version" ]]; then
+            echo "::error::Expected $sha to be the 'chore: release v$version' commit."
+            exit 1
+          fi
+
+          git checkout --detach "$sha"
+          actual="$(node -p "require('./package.json').version")"
+          if [[ "$actual" != "$version" ]]; then
+            echo "::error::$sha has package.json version $actual, expected $version."
+            exit 1
+          fi
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    name: Standalone keyservice binary (${{ matrix.asset }})
+    needs: [release, resolve]
+    if: >-
+      always() && github.repository == 'darkmatter/effect-sops' &&
+      needs.resolve.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64 Linux is built and run on the standard runner; the ARM64
+          # binary is cross-compiled from the same runner because no native
+          # ARM64 GitHub-hosted runner is guaranteed for this repository.
+          - target: bun-linux-x64
+            os: ubuntu-latest
+            asset: effect-sops-keyservice-linux-x64
+            native: true
+          - target: bun-linux-arm64
+            os: ubuntu-latest
+            asset: effect-sops-keyservice-linux-arm64
+            native: false
+          # macOS x64 is cross-compiled; arm64 runs natively on macos-latest.
+          - target: bun-darwin-arm64
+            os: macos-latest
+            asset: effect-sops-keyservice-darwin-arm64
+            native: true
+          - target: bun-darwin-x64
+            os: macos-latest
+            asset: effect-sops-keyservice-darwin-x64
+            native: false
+          - target: bun-windows-x64
+            os: windows-latest
+            asset: effect-sops-keyservice-windows-x64.exe
+            native: true
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Verify checked out commit
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [[ "$actual" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Checked out $actual, expected release commit $EXPECTED_SHA."
+            exit 1
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build standalone keyservice binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          OUTFILE: dist-bin/${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bin
+          bun run build:bin --target="$TARGET" --outfile="$OUTFILE"
+          ls -l "$OUTFILE"
+
+      - name: Smoke test natively built binary
+        if: matrix.native
+        shell: bash
+        env:
+          OUTFILE: dist-bin/${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          # --help works without identities and without binding a socket.
+          env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE "./$OUTFILE" --help > help.txt 2>&1
+          cat help.txt
+          grep -q -- "--network" help.txt
+          grep -q -- "--address" help.txt
+
+      - name: Note cross-compiled binary
+        if: ${{ !matrix.native }}
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: echo "Cross-compiled $TARGET; it cannot be executed on this runner."
+
+      - name: Write checksum
+        shell: bash
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          cd dist-bin
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ASSET" > "$ASSET.sha256"
+          else
+            shasum -a 256 "$ASSET" > "$ASSET.sha256"
+          fi
+          cat "$ASSET.sha256"
+
+      - name: Upload assets to the existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          # Fail closed if the tag has no GitHub Release to attach to.
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "$TAG_NAME" "dist-bin/$ASSET" "dist-bin/$ASSET.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    name: Publish package
+    needs: [release, resolve]
+    # Runs after a successful release job, or alone for a manual republish.
+    if: >-
+      always() && github.repository == 'darkmatter/effect-sops' &&
+      needs.resolve.result == 'success' &&
+      (needs.release.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.release.result == 'skipped'))
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # The version-bump commit resolved above, not mutable main: the same
+      # source the release binaries were built from.
+      - name: Checkout release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.commit_sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -121,12 +323,18 @@ jobs:
 
       - name: Verify release tag matches package version
         id: package
+        env:
+          EXPECTED_SHA: ${{ needs.resolve.outputs.commit_sha }}
         run: |
           version="${TAG_NAME#v}"
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
           if [ "$version" != "$package_version" ]; then
             echo "::error::Release tag $TAG_NAME does not match package.json version $package_version."
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $(git rev-parse HEAD), expected release commit $EXPECTED_SHA."
             exit 1
           fi
           echo "spec=$package_name@$package_version" >> "$GITHUB_OUTPUT"

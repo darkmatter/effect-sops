@@ -21,6 +21,8 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -46,6 +48,20 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Build standalone keyservice binary
+        run: bun run build:bin
+
+      - name: Smoke test standalone keyservice binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --help must work with no identities present.
+          env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_FILE \
+            ./dist-bin/effect-sops-keyservice --help > "$RUNNER_TEMP/keyservice-help.txt" 2>&1
+          cat "$RUNNER_TEMP/keyservice-help.txt"
+          grep -q -- "--network" "$RUNNER_TEMP/keyservice-help.txt"
+          grep -q -- "--address" "$RUNNER_TEMP/keyservice-help.txt"
 
       - name: Smoke test examples
         run: bun run smoke:examples
