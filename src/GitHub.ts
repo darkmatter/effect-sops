@@ -1,4 +1,4 @@
-import * as GitHub from "alchemy/GitHub";
+import * as GitHub from "@alchemy.run/github";
 import * as Output from "alchemy/Output";
 import type * as Provider from "alchemy/Provider";
 import * as Effect from "effect/Effect";

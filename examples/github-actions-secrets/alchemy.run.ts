@@ -1,5 +1,5 @@
 import * as Alchemy from "alchemy";
-import * as GitHub from "alchemy/GitHub";
+import * as GitHub from "@alchemy.run/github";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 

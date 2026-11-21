@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Require `alchemy@2.0.0-beta.84`. Alchemy now ships its GitHub provider as
+  `@alchemy.run/github`, which is a new optional peer dependency used by
+  `GitHubSopsSecrets`. Install it next to `alchemy` when you import the package
+  root.
+
 ### Fixed
 
 - Native keyservice timeouts now interrupt stalled local identity discovery and

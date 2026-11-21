@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import * as GitHub from "alchemy/GitHub";
+import * as GitHub from "@alchemy.run/github";
 import * as Provider from "alchemy/Provider";
 import * as Test from "alchemy/Test/Bun";
 import * as Effect from "effect/Effect";
